@@ -1,0 +1,15 @@
+{
+  "name": "bfb-api",
+  "version": "1.0.0",
+  "description": "API for BFB App",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Tyler Siskar",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3"
+  }
+}
