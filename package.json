@@ -3,13 +3,19 @@
   "version": "1.0.0",
   "description": "API for BFB App",
   "main": "index.js",
+  "type": "module",
   "scripts": {
+    "start": "nodemon -L index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "Tyler Siskar",
   "license": "ISC",
   "dependencies": {
+    "cors": "^2.8.5",
     "express": "^4.19.2",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "node-fetch": "^3.3.2",
+    "nodemon": "^3.1.0",
+    "pg": "^8.11.5"
   }
 }
