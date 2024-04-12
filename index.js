@@ -4,6 +4,7 @@ import fetch from "node-fetch";
 import pg from "pg";
 import cors from "cors";
 import dotenv from "dotenv";
+import bodyParser from "body-parser";
 dotenv.config({ path: "./.env" });
 
 import routes from "./routes.js";
@@ -12,6 +13,8 @@ const { Pool } = pg;
 
 const app = express();
 app.use(cors());
+// Parse JSON bodies
+app.use(bodyParser.json());
 const port = 5000;
 
 // PostgreSQL connection pool
