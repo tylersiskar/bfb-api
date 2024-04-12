@@ -8,9 +8,9 @@ router.get("/players", async (req, res) => {
     const offset = (page - 1) * pageSize;
     let WHERE;
     if (position) {
-      if (rookies) {
-        WHERE = `WHERE position = ${position} AND years_exp = 0`;
-      } else WHERE = `WHERE position = ${position}`;
+      if (Boolean(rookies)) {
+        WHERE = `WHERE position = '${position}' AND years_exp = 0`;
+      } else WHERE = `WHERE position = '${position}'`;
     } else if (rookies) WHERE = `WHERE years_exp = 0`;
     else WHERE = "";
 
@@ -21,7 +21,7 @@ router.get("/players", async (req, res) => {
     res.json(data);
   } catch (error) {
     console.error("Error fetching players:", error);
-    res.status(500).send("Internal Server Error");
+    res.status(500).send({ error, message: "Internal Server Error" });
   }
 });
 
