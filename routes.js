@@ -52,4 +52,16 @@ router.get("/mocks", async (req, res) => {
   }
 });
 
+router.get("/mocks/:id", async (req, res) => {
+  try {
+    const data = await exec(
+      `SELECT * FROM mocks WHERE id = $1 order by create_date desc`,
+      [req.params.id]
+    );
+    res.json(data);
+  } catch (error) {
+    console.error("Error fetching mocks:", error);
+    res.status(500).send({ error, message: "Internal Server Error" });
+  }
+});
 export default router;
