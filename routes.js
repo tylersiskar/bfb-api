@@ -15,7 +15,7 @@ router.get("/players", async (req, res) => {
       WHERE = `WHERE years_exp = 0 AND position not in ('K', 'DEF')`;
     else WHERE = "WHERE position not in ('K', 'DEF')";
 
-    let SQL = `SELECT * FROM vw_players ${WHERE} ORDER BY pos_rank_half_ppr asc, ppg desc OFFSET $1 LIMIT $2`;
+    let SQL = `SELECT * FROM vw_players ${WHERE} ORDER BY value desc, pos_rank_half_ppr asc, ppg desc OFFSET $1 LIMIT $2`;
     const bindParams = [offset, pageSize];
     const data = await exec(SQL, bindParams);
     res.json(data);
