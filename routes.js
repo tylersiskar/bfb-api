@@ -2,6 +2,16 @@ import express from "express";
 import { exec } from "./db.js";
 
 const router = express.Router();
+
+router.get("/playersAll", async (req, res, next) => {
+  try {
+    const data = await exec(`SELECT * FROM VW_PLAYERS`, []);
+    res.json(data);
+  } catch (error) {
+    console.error("Error fetching players:", error);
+    res.status(500).send({ error, message: "Internal Server Error" });
+  }
+});
 router.get("/players", async (req, res) => {
   try {
     const { page = 1, pageSize = 50, position, rookies } = req.query;
