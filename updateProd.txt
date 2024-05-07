@@ -1,0 +1,11 @@
+rsync -avz --exclude 'node_modules' --exclude ktc_scraper.py --exclude updateProd.txt --exclude 'env' --exclude '.git' --exclude '.env' \-e "ssh -i ~/.ssh/BFB.pem" \. ec2-user@ec2-44-220-147-91.compute-1.amazonaws.com:~/app
+
+ssh -i "~/.ssh/BFB.pem" ec2-user@ec2-44-220-147-91.compute-1.amazonaws.com
+
+pm2 restart all
+------
+UPDATE players/stats
+PG_USER=postgres PG_PASSWORD=bills2sb PG_DB=bfb PG_HOST=44.220.147.91 node scripts.js updateNFLPlayers
+PG_USER=postgres PG_PASSWORD=bills2sb PG_DB=bfb PG_HOST=44.220.147.91 python3 ktc_scraper.py
+PG_USER=postgres PG_PASSWORD=bills2sb PG_DB=bfb PG_HOST=44.220.147.91 node scripts.js updatePlayerStats
+

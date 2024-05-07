@@ -26,13 +26,21 @@ def insert_records(records):
     with conn:
         with conn.cursor() as cur:
             # Delete all records first
-            cur.execute("DELETE FROM dynasty_rankings")
-            # Prepare a query to insert records
-            query = "INSERT INTO dynasty_rankings (name, value) VALUES %s"
+
+            query = """
+            INSERT INTO dynasty_rankings (name, value)
+            VALUES %s
+            ON CONFLICT (name) DO UPDATE
+            SET value = EXCLUDED.value;
+            """
             # A list of tuples from the list of dictionaries
             values = [(record['name'], record['value']) for record in records]
-            # Use execute_values() to insert the records
+            print("Execute Upsert.")
+            # Use execute_values() to perform the UPSERT
             extras.execute_values(cur, query, values)
+
+            # Commit the transaction
+            conn.commit()
 
 
 def fetch_data(url):
@@ -84,7 +92,7 @@ def scrape_keep_trade_cut():
                 break
         all_players.extend(player_data)
         page += 1
-        time.sleep(.25)  # Sleep to be polite to the server
+        time.sleep(.5)  # Sleep to be polite to the server
 
     return all_players
 
