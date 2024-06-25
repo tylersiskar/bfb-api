@@ -14,21 +14,29 @@ router.get("/playersAll", async (req, res, next) => {
 });
 router.get("/players", async (req, res) => {
   try {
-    const { page = 1, pageSize = 50, position, rookies } = req.query;
+    const { page = 1, pageSize = 50, position, rookies, id } = req.query;
     const offset = (page - 1) * pageSize;
     let WHERE;
-    if (position) {
-      if (Boolean(rookies)) {
-        WHERE = `WHERE position = '${position}' AND years_exp = 0`;
-      } else WHERE = `WHERE position = '${position}'`;
-    } else if (rookies)
-      WHERE = `WHERE years_exp = 0 AND position not in ('K', 'DEF')`;
-    else WHERE = "WHERE position not in ('K', 'DEF')";
+    let SQL = "";
+    if (id) {
+      SQL = `select * from vw_players where id = ANY($1::text[]) order by position asc`;
+      const bindParams = [JSON.parse(id)];
+      const data = await exec(SQL, bindParams);
+      res.json(data);
+    } else {
+      if (position) {
+        if (Boolean(rookies)) {
+          WHERE = `WHERE position = '${position}' AND years_exp = 0`;
+        } else WHERE = `WHERE position = '${position}'`;
+      } else if (rookies)
+        WHERE = `WHERE years_exp = 0 AND position not in ('K', 'DEF')`;
+      else WHERE = "WHERE position not in ('K', 'DEF')";
 
-    let SQL = `SELECT * FROM vw_players ${WHERE} ORDER BY value desc, pos_rank_half_ppr asc, ppg desc OFFSET $1 LIMIT $2`;
-    const bindParams = [offset, pageSize];
-    const data = await exec(SQL, bindParams);
-    res.json(data);
+      SQL = `SELECT * FROM vw_players ${WHERE} ORDER BY value desc, pos_rank_half_ppr asc, ppg desc OFFSET $1 LIMIT $2`;
+      const bindParams = [offset, pageSize];
+      const data = await exec(SQL, bindParams);
+      res.json(data);
+    }
   } catch (error) {
     console.error("Error fetching players:", error);
     res.status(500).send({ error, message: "Internal Server Error" });
