@@ -5,7 +5,7 @@ const router = express.Router();
 
 router.get("/playersAll", async (req, res, next) => {
   try {
-    const data = await exec(`SELECT * FROM VW_PLAYERS`, []);
+    const data = await exec(`SELECT * FROM nfl_PLAYERS`, []);
     res.json(data);
   } catch (error) {
     console.error("Error fetching players:", error);
