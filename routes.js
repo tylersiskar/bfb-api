@@ -3,9 +3,11 @@ import { exec } from "./db.js";
 
 const router = express.Router();
 
-router.get("/playersAll", async (req, res, next) => {
+router.get("/playersAll/:year", async (req, res, next) => {
   try {
-    const data = await exec(`SELECT * FROM nfl_PLAYERS`, []);
+    const data = await exec(`SELECT * FROM vw_players where year = $1`, [
+      req.params.year,
+    ]);
     res.json(data);
   } catch (error) {
     console.error("Error fetching players:", error);
@@ -14,7 +16,7 @@ router.get("/playersAll", async (req, res, next) => {
 });
 router.get("/players", async (req, res) => {
   try {
-    const { page = 1, pageSize = 50, position, rookies, id } = req.query;
+    const { page = 1, pageSize = 50, position, rookies, id, year } = req.query;
     const offset = (page - 1) * pageSize;
     let WHERE;
     let SQL = "";
@@ -32,7 +34,7 @@ router.get("/players", async (req, res) => {
         WHERE = `WHERE years_exp = 0 AND position not in ('K', 'DEF')`;
       else WHERE = "WHERE position not in ('K', 'DEF')";
 
-      SQL = `SELECT * FROM vw_players ${WHERE} ORDER BY value desc, pos_rank_half_ppr asc, ppg desc OFFSET $1 LIMIT $2`;
+      SQL = `SELECT * FROM vw_players ${WHERE} and year = '${year}' ORDER BY value desc, pos_rank_half_ppr asc, ppg desc OFFSET $1 LIMIT $2`;
       const bindParams = [offset, pageSize];
       const data = await exec(SQL, bindParams);
       res.json(data);
@@ -82,4 +84,20 @@ router.get("/mocks/:id", async (req, res) => {
     res.status(500).send({ error, message: "Internal Server Error" });
   }
 });
+
+router.get("/stats/:year", async (req, res) => {
+  try {
+    const data = await exec(
+      `select * from vw_stats where year = $1 and pts_half_ppr is not null and gms_active is not null and position in ('QB', 'RB', 'WR', 'TE', 'DEF', 'K')`,
+      [req.params.year]
+    );
+    res.json(data);
+  } catch (error) {
+    console.error("Error fetching stats:", error);
+    res.status(500).send({ error, message: "Internal Server Error" });
+  }
+});
 export default router;
+/**
+ *
+ */
