@@ -21,7 +21,7 @@ router.get("/players", async (req, res) => {
     let WHERE;
     let SQL = "";
     if (id) {
-      SQL = `select * from vw_players where id = ANY($1::text[]) order by position asc`;
+      SQL = `select * from vw_players where id = ANY($1::text[]) and year = '${year}' order by position asc`;
       const bindParams = [JSON.parse(id)];
       const data = await exec(SQL, bindParams);
       res.json(data);

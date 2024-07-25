@@ -479,7 +479,7 @@ const dynastyRankings = [
 ];
 
 // Function to fetch NFL players and update the database
-async function updatePlayerStats(year = "2023") {
+async function updatePlayerStats(year = "2024") {
   console.log("Start Update Players Stats.");
   try {
     const response = await fetch(
