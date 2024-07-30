@@ -1,5 +1,6 @@
 import express from "express";
 import { exec } from "./db.js";
+import { _getGoogleSheetClient, _readGoogleSheet } from "./google-sheets.js";
 
 const router = express.Router();
 
@@ -96,6 +97,35 @@ router.get("/stats/:year", async (req, res) => {
     console.error("Error fetching stats:", error);
     res.status(500).send({ error, message: "Internal Server Error" });
   }
+});
+
+router.get("/redraft", async (req, res) => {
+  const sheetId = process.env.GOOGLE_SHEET_ID;
+  const tabName = "Redraft";
+  const range = "A:I";
+  const googleSheetClient = await _getGoogleSheetClient();
+
+  const data = await _readGoogleSheet(
+    googleSheetClient,
+    sheetId,
+    tabName,
+    range
+  );
+  res.json(data);
+});
+router.get("/dynasty", async (req, res) => {
+  const sheetId = process.env.GOOGLE_SHEET_ID;
+  const tabName = "Dynasty";
+  const range = "A:I";
+  const googleSheetClient = await _getGoogleSheetClient();
+
+  const data = await _readGoogleSheet(
+    googleSheetClient,
+    sheetId,
+    tabName,
+    range
+  );
+  res.json(data);
 });
 export default router;
 /**
