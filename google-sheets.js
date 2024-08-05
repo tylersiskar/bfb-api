@@ -1,7 +1,7 @@
 import { google } from "googleapis";
 
 const serviceAccountKeyFile = "./private.json";
-const serviceAccountKeyFile = process.env.PATH_TO_KEY;
+// const serviceAccountKeyFile = process.env.PATH_TO_KEY;
 
 async function _getGoogleSheetClient() {
   const auth = new google.auth.GoogleAuth({
@@ -25,12 +25,16 @@ async function _readGoogleSheet(googleSheetClient, sheetId, tabName, range) {
     console.log("No google sheet client");
     return [];
   }
-  const res = await googleSheetClient.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range: `${tabName}!${range}`,
-  });
+  try {
+    const res = await googleSheetClient.spreadsheets.values.get({
+      spreadsheetId: sheetId,
+      range: `${tabName}!${range}`,
+    });
 
-  return res.data.values;
+    return res.data.values;
+  } catch (err) {
+    return;
+  }
 }
 
 async function _writeGoogleSheet(
@@ -38,17 +42,17 @@ async function _writeGoogleSheet(
   sheetId,
   tabName,
   range,
-  data
+  values
 ) {
-  await googleSheetClient.spreadsheets.values.append({
+  await googleSheetClient.spreadsheets.values.clear({
+    spreadsheetId: sheetId,
+    range: `${tabName}!A:A`,
+  });
+  await googleSheetClient.spreadsheets.values.update({
     spreadsheetId: sheetId,
     range: `${tabName}!${range}`,
-    valueInputOption: "USER_ENTERED",
-    insertDataOption: "INSERT_ROWS",
-    resource: {
-      majorDimension: "ROWS",
-      values: data,
-    },
+    valueInputOption: "RAW",
+    resource: { values },
   });
 }
 

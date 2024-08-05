@@ -1,6 +1,10 @@
 import express from "express";
 import { exec } from "./db.js";
-import { _getGoogleSheetClient, _readGoogleSheet } from "./google-sheets.js";
+import {
+  _getGoogleSheetClient,
+  _readGoogleSheet,
+  _writeGoogleSheet,
+} from "./google-sheets.js";
 
 const router = express.Router();
 
@@ -48,10 +52,10 @@ router.get("/players", async (req, res) => {
 
 // mock routes
 
-router.post("/mocks", async (req, res, next) => {
+router.post("/league/:leagueId/mocks", async (req, res, next) => {
   try {
-    let SQL = `INSERT INTO mocks (picks, name) VALUES ($1, $2)`;
-    const bindParams = [req.body.picks, req.body.name];
+    let SQL = `INSERT INTO mocks (picks, name, league_id) VALUES ($1, $2, $3)`;
+    const bindParams = [req.body.picks, req.body.name, req.params.leagueId];
     const data = await exec(SQL, bindParams);
     res.status(200).send({ message: "Success", data });
   } catch (error) {
@@ -60,11 +64,11 @@ router.post("/mocks", async (req, res, next) => {
   }
 });
 
-router.get("/mocks", async (req, res) => {
+router.get("/league/:leagueId/mocks", async (req, res) => {
   try {
     const data = await exec(
-      `SELECT * FROM mocks order by create_date desc`,
-      []
+      `SELECT * FROM mocks where league_id = $1 order by create_date desc`,
+      [req.params.leagueId]
     );
     res.json(data);
   } catch (error) {
@@ -73,7 +77,7 @@ router.get("/mocks", async (req, res) => {
   }
 });
 
-router.get("/mocks/:id", async (req, res) => {
+router.get("/league/:leagueId/mocks/:id", async (req, res) => {
   try {
     const data = await exec(
       `SELECT * FROM mocks WHERE id = $1 order by create_date desc`,
@@ -100,7 +104,8 @@ router.get("/stats/:year", async (req, res) => {
 });
 
 router.get("/redraft", async (req, res) => {
-  const sheetId = process.env.GOOGLE_SHEET_ID;
+  // const sheetId = process.env.GOOGLE_SHEET_ID;
+  const sheetId = "1LVIwS0t--qsD-0tZbC2LSXFbf1NstSasmesChmJbn9w";
   const tabName = "Redraft";
   const range = "A:I";
   const googleSheetClient = await _getGoogleSheetClient();
@@ -114,7 +119,8 @@ router.get("/redraft", async (req, res) => {
   res.json(data);
 });
 router.get("/dynasty", async (req, res) => {
-  const sheetId = process.env.GOOGLE_SHEET_ID;
+  // const sheetId = process.env.GOOGLE_SHEET_ID;
+  const sheetId = "1LVIwS0t--qsD-0tZbC2LSXFbf1NstSasmesChmJbn9w";
   const tabName = "Dynasty";
   const range = "A:I";
   const googleSheetClient = await _getGoogleSheetClient();
@@ -127,7 +133,82 @@ router.get("/dynasty", async (req, res) => {
   );
   res.json(data);
 });
+
+router.post("/calculate", async (req, res) => {
+  // const sheetId = process.env.GOOGLE_SHEET_ID;
+  const sheetId = "1LVIwS0t--qsD-0tZbC2LSXFbf1NstSasmesChmJbn9w";
+  const googleSheetClient = await _getGoogleSheetClient();
+  const { activeRoster, draftedPlayers } = req.body;
+  const values = [
+    ...activeRoster.map((obj) => [`${obj.first_name} ${obj.last_name}`]),
+    [""],
+  ];
+  const rosterRange = "A:A";
+  /**
+  const drafted = [
+    ...req.body.draftedPlayers.map(
+      (obj) => `${obj.first_name} ${obj.last_name}`
+    ),
+    "",
+  ];
+  const draftedRange = `C:C`;
+  let combiened = [...values, ...drafted].map((_, i) => [
+    values[i],
+    "",
+    drafted[i],
+  ]);
+
+  console.log(combiened);
+  const startRow = 1; // Assuming you want to start writing from the first row
+  const endRow = startRow + combiened.length - 1;
+  const range = `A${startRow}:C${endRow}`;
+   */
+  try {
+    await _writeGoogleSheet(
+      googleSheetClient,
+      sheetId,
+      "BFB",
+      rosterRange,
+      values
+    );
+
+    setTimeout(async () => {
+      const csvData = await _readGoogleSheet(
+        googleSheetClient,
+        sheetId,
+        "BFB Draft Board",
+        "A:E"
+      );
+
+      const headers = csvData[1];
+      const result = csvData.slice(2).map((row) => {
+        const obj = {};
+        for (let i = 0; i < headers.length; i++) {
+          obj[headers[i]] = row[i];
+        }
+        return obj;
+      });
+
+      let draftedNames = draftedPlayers.map(
+        (p) => `${p.first_name} ${p.last_name}`
+      );
+      let finalResult = result.filter((player) => {
+        let playerName = player["PLAYER NAME"].includes(" Jr.")
+          ? player["PLAYER NAME"].split(" Jr.")[0]
+          : player["PLAYER NAME"].includes(" Sr.")
+          ? player["PLAYER NAME"].split(" Sr.")[0]
+          : player["PLAYER NAME"].includes(" II")
+          ? player["PLAYER NAME"].split(" II")[0]
+          : player["PLAYER NAME"].includes(" III")
+          ? player["PLAYER NAME"].split(" III")[0]
+          : player["PLAYER NAME"];
+        return !draftedNames.includes(playerName);
+      });
+      res.json(finalResult);
+    }, 3000);
+  } catch (error) {
+    res.status(500).send(error.toString());
+  }
+});
+
 export default router;
-/**
- *
- */
