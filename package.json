@@ -11,6 +11,7 @@
   "author": "Tyler Siskar",
   "license": "ISC",
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.633.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
@@ -18,6 +19,8 @@
     "node-cron": "^3.0.3",
     "node-fetch": "^3.3.2",
     "nodemon": "^3.1.0",
-    "pg": "^8.11.5"
+    "pg": "^8.11.5",
+    "sharp": "^0.33.5",
+    "uuid": "^10.0.0"
   }
 }

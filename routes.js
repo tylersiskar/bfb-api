@@ -1,10 +1,19 @@
 import express from "express";
+import sharp from "sharp";
 import { exec } from "./db.js";
 import {
   _getGoogleSheetClient,
   _readGoogleSheet,
   _writeGoogleSheet,
 } from "./google-sheets.js";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { v4 as uuidv4 } from "uuid";
+
+let URL = `https://s3.amazonaws.com/badfranchisebuilders.com/thumbnails/{IMAGE}`;
+// Configure AWS SDK
+const s3 = new S3Client({
+  region: "us-east-1", // Ensure this matches your S3 bucket's region
+});
 
 const router = express.Router();
 
@@ -52,17 +61,62 @@ router.get("/players", async (req, res) => {
 
 // mock routes
 
-router.post("/league/:leagueId/mocks", async (req, res, next) => {
-  try {
-    let SQL = `INSERT INTO mocks (picks, name, league_id) VALUES ($1, $2, $3)`;
-    const bindParams = [req.body.picks, req.body.name, req.params.leagueId];
-    const data = await exec(SQL, bindParams);
-    res.status(200).send({ message: "Success", data });
-  } catch (error) {
-    console.error("Error posting mocks:", error);
-    res.status(500).send({ error, message: "Internal Server Error" });
+router.post(
+  "/league/:leagueId/mocks",
+  async (req, res, next) => {
+    try {
+      let image_id = uuidv4();
+      let image = `${image_id}.png`;
+      let SQL = `INSERT INTO mocks (picks, name, league_id, thumbnail) VALUES ($1, $2, $3, $4) returning id`;
+      const bindParams = [
+        req.body.picks,
+        req.body.name,
+        req.params.leagueId,
+        image,
+      ];
+      const data = await exec(SQL, bindParams);
+      // res.status(200).send({ message: "Success", data });
+      req.mockId = data[0].id;
+      req.filename = image;
+      next();
+    } catch (error) {
+      console.error("Error posting mocks:", error);
+      res.status(500).send({ error, message: "Internal Server Error" });
+    }
+  },
+  async (req, res, next) => {
+    let image = req.body.image; // uploaded image
+
+    const buffer = Buffer.from(
+      image.replace(/^data:image\/\w+;base64,/, ""),
+      "base64"
+    );
+
+    // Resize the image using Sharp
+    const resizedImageBuffer = await sharp(buffer).resize(368, 204).toBuffer();
+
+    // Generate a unique file name for the thumbnail
+    const fileName = `thumbnails/${req.filename}`;
+
+    // Prepare the S3 upload parameters
+    const uploadParams = {
+      Bucket: "badfranchisebuilders.com", // Replace with your S3 bucket name
+      Key: fileName,
+      Body: resizedImageBuffer,
+      ContentType: "image/png",
+    };
+
+    try {
+      // Upload the image to S3
+      const command = new PutObjectCommand(uploadParams);
+      await s3.send(command);
+      let imageUrl = URL.replace("{IMAGE}", req.filename);
+      res.status(200).send({ message: "Success", url: imageUrl });
+    } catch (err) {
+      res.status(500).send({ error: err });
+    }
   }
-});
+);
 
 router.get("/league/:leagueId/mocks", async (req, res) => {
   try {
