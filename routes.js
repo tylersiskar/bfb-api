@@ -189,7 +189,6 @@ router.get("/dynasty", async (req, res) => {
 });
 
 router.post("/calculate", async (req, res) => {
-  // const sheetId = process.env.GOOGLE_SHEET_ID;
   const sheetId = "1LVIwS0t--qsD-0tZbC2LSXFbf1NstSasmesChmJbn9w";
   const googleSheetClient = await _getGoogleSheetClient();
   const { activeRoster, draftedPlayers } = req.body;
@@ -198,25 +197,6 @@ router.post("/calculate", async (req, res) => {
     [""],
   ];
   const rosterRange = "A:A";
-  /**
-  const drafted = [
-    ...req.body.draftedPlayers.map(
-      (obj) => `${obj.first_name} ${obj.last_name}`
-    ),
-    "",
-  ];
-  const draftedRange = `C:C`;
-  let combiened = [...values, ...drafted].map((_, i) => [
-    values[i],
-    "",
-    drafted[i],
-  ]);
-
-  console.log(combiened);
-  const startRow = 1; // Assuming you want to start writing from the first row
-  const endRow = startRow + combiened.length - 1;
-  const range = `A${startRow}:C${endRow}`;
-   */
   try {
     await _writeGoogleSheet(
       googleSheetClient,
