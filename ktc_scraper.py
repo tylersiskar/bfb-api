@@ -22,19 +22,27 @@ conn = psycopg2.connect(dbname=dbname, user=user, password=password, host=host)
 
 
 def insert_records(records):
-    # print(records)
     with conn:
         with conn.cursor() as cur:
-            # Delete all records first
-
             query = """
-            INSERT INTO dynasty_rankings (name, value)
+            INSERT INTO dynasty_rankings (name, value, last_updated)
             VALUES %s
             ON CONFLICT (name) DO UPDATE
-            SET value = EXCLUDED.value;
+            SET value = EXCLUDED.value, last_updated = NOW();
             """
+
             # A list of tuples from the list of dictionaries
-            values = [(record['name'], record['value']) for record in records]
+            values = [(record['name'], record['value'], 'NOW()')
+                      for record in records]
+
+            # Remove duplicates based on 'name'
+            unique_records = {}
+            for record in values:
+                name = record[0]  # 'name' is the first column
+                unique_records[name] = record
+
+            values = list(unique_records.values())
+
             print("Execute Upsert.")
             # Use execute_values() to perform the UPSERT
             extras.execute_values(cur, query, values)

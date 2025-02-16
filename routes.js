@@ -8,6 +8,9 @@ import {
 } from "./google-sheets.js";
 import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { v4 as uuidv4 } from "uuid";
+import { spawn } from "child_process";
+import pg from "pg";
+const { Pool } = pg;
 
 let URL = `https://s3.amazonaws.com/badfranchisebuilders.com/thumbnails/{IMAGE}`;
 // Configure AWS SDK
@@ -56,6 +59,81 @@ router.get("/players", async (req, res) => {
   } catch (error) {
     console.error("Error fetching players:", error);
     res.status(500).send({ error, message: "Internal Server Error" });
+  }
+});
+
+//update player rankings
+router.post("/updatePlayerRankings/:year", async (req, res) => {
+  console.log("Start Update Players Stats.");
+  let year = req.params.year ?? "2024";
+
+  try {
+    const response = await fetch(
+      `https://api.sleeper.app/v1/stats/nfl/regular/${year}`
+    );
+    const pool = new Pool({
+      user: process.env.PG_USER,
+      host: process.env.PG_HOST,
+      database: process.env.PG_DB,
+      password: process.env.PG_PASSWORD,
+      port: 5432,
+    });
+    const stats = await response.json();
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+      await client.query("DELETE FROM player_stats where year = $1", [year]);
+
+      for (const playerId in stats) {
+        const player = stats[playerId];
+        await client.query(
+          "INSERT INTO player_stats (player_id, pos_rank_half_ppr, gms_active, pts_half_ppr, year) VALUES ($1, $2, $3, $4, $5)",
+          [
+            playerId,
+            player.pos_rank_half_ppr,
+            player.gms_active,
+            player.pts_half_ppr,
+            year,
+          ]
+        );
+      }
+
+      console.log("Update Stats Complete.");
+      // Commit transaction
+      await client.query("COMMIT");
+      // Start the next function (the python process)
+      const pythonProcess = spawn("python", ["ktc_scraper.py"]);
+
+      pythonProcess.stdout.on("data", (data) => {
+        console.log(`stdout: ${data}`);
+      });
+
+      pythonProcess.stderr.on("data", (data) => {
+        console.error(`stderr: ${data}`);
+      });
+
+      pythonProcess.on("close", (code) => {
+        if (code === 0) {
+          res.status(200).send("Player rankings updated successfully.");
+        } else {
+          res.status(500).send(`Python script exited with code ${code}`);
+        }
+      });
+
+      pythonProcess.on("error", (err) => {
+        console.error(`Failed to start subprocess: ${err}`);
+        res.status(500).send("Failed to run the Python script");
+      });
+    } catch (err) {
+      await client.query("ROLLBACK");
+      res.status(500).send("Failed to update stats: " + err.message);
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error("Failed to update NFL stats:", error);
+    res.status(500).send("Error fetching stats");
   }
 });
 

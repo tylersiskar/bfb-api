@@ -1,12 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import bodyParser from "body-parser";
-import {
-  updateDynastyRankings,
-  updateNflPlayers,
-  updatePlayerStats,
-} from "./tasks.js";
+import { updateNflPlayers, updatePlayerStats } from "./tasks.js";
 dotenv.config({ path: "./.env" });
 
 import routes from "./routes.js";
@@ -35,12 +30,6 @@ app.get("/updateStats", (req, res) => {
     .catch((err) => res.send(err));
 });
 
-app.get("/updateDynasty", (req, res) => {
-  updateDynastyRankings()
-    .then(() => res.send("Updated dynasty rankings successfully!"))
-    .catch((err) => res.send(err));
-});
-
 if (process.argv.length === 2) {
   app.listen(port, () => {
     console.log(`Server running at http://localhost:${port}`);
@@ -57,11 +46,6 @@ if (process.argv.length === 2) {
     case "updatePlayerStats":
       updatePlayerStats()
         .then(() => console.log("Updated player stats successfully!"))
-        .catch(console.error);
-      break;
-    case "updateDynastyRankings":
-      updateDynastyRankings()
-        .then(() => console.log("Updated dynasty rankings successfully!"))
         .catch(console.error);
       break;
     default:
