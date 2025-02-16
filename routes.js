@@ -102,6 +102,32 @@ router.post("/updatePlayerRankings/:year", async (req, res) => {
       console.log("Update Stats Complete.");
       // Commit transaction
       await client.query("COMMIT");
+
+      // Start updating nfl players
+      const response = await fetch("https://api.sleeper.app/v1/players/nfl");
+      const players = await response.json();
+      await client.query("DELETE FROM nfl_players");
+
+      for (const playerId in players) {
+        const player = players[playerId];
+        // Modify the query based on the structure of the players object
+        // and your table structure
+        await client.query(
+          "INSERT INTO nfl_players (id, first_name, last_name, position, team, active, years_exp) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+          [
+            playerId,
+            player.first_name,
+            player.last_name,
+            player.position,
+            player.team,
+            player.active,
+            player.years_exp,
+          ]
+        );
+      }
+      console.log("Update Players Complete.");
+      await client.query("COMMIT");
+
       // Start the next function (the python process)
       const pythonProcess = spawn("python", ["ktc_scraper.py"]);
 
@@ -123,7 +149,7 @@ router.post("/updatePlayerRankings/:year", async (req, res) => {
 
       pythonProcess.on("error", (err) => {
         console.error(`Failed to start subprocess: ${err}`);
-        res.status(500).send("Failed to run the Python script");
+        res.status(500).send(err);
       });
     } catch (err) {
       await client.query("ROLLBACK");
