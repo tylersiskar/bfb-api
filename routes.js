@@ -62,11 +62,45 @@ router.get("/players", async (req, res) => {
   }
 });
 
+router.get("/players/:id", async (req, res) => {
+  try {
+    const data = await exec(
+      `select * from vw_players where id = $1 and year = $2`,
+      [req.params.id, req.query.year]
+    );
+    data.length ? res.json(data[0]) : res.json({});
+  } catch (error) {
+    console.error("Error fetching players:", error);
+    res.status(500).send({ error, message: "Internal Server Error" });
+  }
+});
+
+// player search (eventually be player / team / user search )
+router.get("/search", async (req, res) => {
+  const { name, year = 2025 } = req.query;
+  if (name) {
+    let sql = `SELECT *
+      FROM vw_players
+      WHERE full_name ILIKE '%${name}%' and year::integer = $2
+      ORDER BY value desc, similarity(full_name, $1) DESC
+      LIMIT 5;
+      `;
+    try {
+      const data = await exec(sql, [name, year]);
+      res.json(data);
+    } catch (error) {
+      console.error("Error searching:", error);
+      res.status(500).send({ error, message: "Internal Server Error" });
+    }
+  } else {
+    res.json([]);
+  }
+});
+
 //update player rankings
 router.post("/updatePlayerRankings/:year", async (req, res) => {
   console.log("Start Update Players Stats.");
   let year = req.params.year ?? "2024";
-
   try {
     const response = await fetch(
       `https://api.sleeper.app/v1/stats/nfl/regular/${year}`
@@ -92,7 +126,7 @@ router.post("/updatePlayerRankings/:year", async (req, res) => {
           [
             playerId,
             player.pos_rank_half_ppr,
-            player.gms_active,
+            player.gs,
             player.pts_half_ppr,
             year,
           ]
@@ -249,11 +283,15 @@ router.get("/league/:leagueId/mocks/:id", async (req, res) => {
 });
 
 router.get("/stats/:year", async (req, res) => {
+  let queryParams = req.query;
+  let sql = `select * from vw_stats where year = $1 and pts_half_ppr is not null and gms_active is not null and position in ('QB', 'RB', 'WR', 'TE', 'DEF', 'K')`;
+  let bindParams = [req.params.year];
+  if (queryParams && queryParams.pos) {
+    sql = `select * from vw_stats where year = $1 and pts_half_ppr is not null and gms_active is not null and position = $2`;
+    bindParams = [req.params.year, req.query.pos];
+  }
   try {
-    const data = await exec(
-      `select * from vw_stats where year = $1 and pts_half_ppr is not null and gms_active is not null and position in ('QB', 'RB', 'WR', 'TE', 'DEF', 'K')`,
-      [req.params.year]
-    );
+    const data = await exec(sql, bindParams);
     res.json(data);
   } catch (error) {
     console.error("Error fetching stats:", error);
