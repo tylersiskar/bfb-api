@@ -10,7 +10,7 @@ const app = express();
 app.use(cors());
 // Parse JSON bodies with a custom limit
 app.use(express.json({ limit: "10mb" }));
-const port = 5001;
+const port = 5000;
 
 app.use("/api", routes);
 

@@ -22,9 +22,15 @@ const router = express.Router();
 
 router.get("/playersAll/:year", async (req, res, next) => {
   try {
-    const data = await exec(`SELECT * FROM vw_players where year = $1`, [
-      req.params.year,
-    ]);
+    const position = req.query?.position;
+    let sqlQuery = `SELECT * FROM vw_players where year = $1 and ppg > 0`;
+    let bindParams = [req.params.year];
+    const ppg = position ? (position === "TE" ? 5 : 10) : 5;
+    if (position) {
+      sqlQuery = `SELECT * FROM vw_players where year = $1 and ppg > $2 and position = $3`;
+      bindParams = [req.params.year, ppg, position];
+    }
+    const data = await exec(sqlQuery, bindParams);
     res.json(data);
   } catch (error) {
     console.error("Error fetching players:", error);
