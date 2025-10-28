@@ -127,13 +127,12 @@ router.post("/updatePlayerRankings/:year", async (req, res) => {
 
       for (const playerId in stats) {
         const player = stats[playerId];
-        if (playerId === "1945") console.log(player);
         await client.query(
           "INSERT INTO player_stats (player_id, pos_rank_half_ppr, gms_active, pts_half_ppr, year) VALUES ($1, $2, $3, $4, $5)",
           [
             playerId,
             player.pos_rank_half_ppr,
-            player.gms_active ?? player.gs,
+            player.gp ?? player.gs ?? player.gms_active,
             player.pts_half_ppr,
             year,
           ]
