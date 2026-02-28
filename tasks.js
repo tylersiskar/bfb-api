@@ -14,7 +14,7 @@ const pool = new Pool({
 // Function to fetch NFL players and update the database
 async function updatePlayerStats(req, res, next) {
   console.log("Start Update Players Stats.");
-  let year = req.params.year ?? "2024";
+  let year = req.params.year ?? "2025";
   try {
     const response = await fetch(
       `https://api.sleeper.app/v1/stats/nfl/regular/${year}`

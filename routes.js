@@ -12,7 +12,7 @@ import { spawn } from "child_process";
 import pg from "pg";
 const { Pool } = pg;
 
-let URL = `https://s3.amazonaws.com/badfranchisebuilders.com/thumbnails/{IMAGE}`;
+let S3_THUMBNAIL_URL = `https://s3.amazonaws.com/badfranchisebuilders.com/thumbnails/{IMAGE}`;
 // Configure AWS SDK
 const s3 = new S3Client({
   region: "us-east-1", // Ensure this matches your S3 bucket's region
@@ -20,18 +20,65 @@ const s3 = new S3Client({
 
 const router = express.Router();
 
+const calculateBfbValue = (data) => {
+  // Position-specific keeper model settings – tweak freely
+  const POSITION_CONFIG = {
+    QB: {
+      weightPpg: 0.7, // care more about actual PPG
+      weightValue: 0.3,
+      cutoff: 0.9, // stricter: fewer QBs above line
+    },
+    RB: {
+      weightPpg: 0.45, // a bit flatter trade-off than WR
+      weightValue: 0.55,
+      cutoff: 0.8,
+    },
+    WR: {
+      weightPpg: 0.55,
+      weightValue: 0.45,
+      cutoff: 0.85,
+    },
+    TE: {
+      weightPpg: 0.7,
+      weightValue: 0.3,
+      cutoff: 0.9,
+    },
+  };
+
+  return data.map((player) => {
+    const { cutoff, weightValue, weightPpg } =
+      POSITION_CONFIG[player["position"]];
+    const { value_percentile, ppg_percentile } = player;
+    const lineYValue = (cutoff - weightValue * value_percentile) / weightPpg;
+    const lineXValue = (cutoff - weightPpg * ppg_percentile) / weightValue;
+
+    const deltaY = ppg_percentile - lineYValue;
+    const deltaX = value_percentile - lineXValue;
+    let bfbValue = Math.sqrt(
+      Math.pow(deltaY, 2) -
+        Math.pow(deltaY, 4) / (Math.pow(deltaX, 2) + Math.pow(deltaY, 2))
+    );
+    if (deltaX < 0 && deltaY < 0) {
+      bfbValue *= -1;
+    }
+    return { ...player, bfbValue: bfbValue.toFixed(3) * 1000 };
+  });
+};
+
 router.get("/playersAll/:year", async (req, res, next) => {
   try {
     const position = req.query?.position;
     let sqlQuery = `SELECT * FROM vw_players where year = $1 and ppg > 0`;
     let bindParams = [req.params.year];
-    const ppg = position ? (position === "TE" ? 5 : 10) : 5;
     if (position) {
-      sqlQuery = `SELECT * FROM vw_players where year = $1 and ppg > $2 and position = $3`;
-      bindParams = [req.params.year, ppg, position];
+      sqlQuery = `SELECT * FROM vw_players where year = $1 and ppg_percentile > $2 and value_percentile > $3 and position = $4`;
+      bindParams = [req.params.year, 0.55, 0.55, position];
     }
     const data = await exec(sqlQuery, bindParams);
-    res.json(data);
+
+    const dataWithBfbValue = calculateBfbValue(data);
+    console.log(dataWithBfbValue[0]);
+    res.json(dataWithBfbValue);
   } catch (error) {
     console.error("Error fetching players:", error);
     res.status(500).send({ error, message: "Internal Server Error" });
@@ -106,7 +153,7 @@ router.get("/search", async (req, res) => {
 //update player rankings
 router.post("/updatePlayerRankings/:year", async (req, res) => {
   console.log("Start Update Players Stats.");
-  let year = req.params.year ?? "2024";
+  let year = req.params.year ?? "2025";
   try {
     const response = await fetch(
       `https://api.sleeper.app/v1/stats/nfl/regular/${year}`
@@ -254,7 +301,7 @@ router.post(
       // Upload the image to S3
       const command = new PutObjectCommand(uploadParams);
       await s3.send(command);
-      let imageUrl = URL.replace("{IMAGE}", req.filename);
+      let imageUrl = S3_THUMBNAIL_URL.replace("{IMAGE}", req.filename);
       res.status(200).send({ message: "Success", url: imageUrl });
     } catch (err) {
       res.status(500).send({ error: err });
