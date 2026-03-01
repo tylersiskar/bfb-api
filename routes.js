@@ -42,7 +42,13 @@ const calculateBfbValue = (data) => {
     if (!config) return { ...player, bfbValue: null };
 
     const { cutoff, weightValue, weightPpg } = config;
-    const { value_percentile, ppg_percentile } = player;
+    const { value_percentile, ppg_percentile, gms_active } = player;
+
+    // No games played — rank purely by dynasty value
+    if (!gms_active) {
+      return { ...player, bfbValue: Math.round(value_percentile * 1000) };
+    }
+
     const lineYValue = (cutoff - weightValue * value_percentile) / weightPpg;
     const lineXValue = (cutoff - weightPpg * ppg_percentile) / weightValue;
 
@@ -54,7 +60,7 @@ const calculateBfbValue = (data) => {
     );
     if (deltaX < 0 && deltaY < 0) bfbValue *= -1;
 
-    return { ...player, bfbValue: bfbValue.toFixed(3) * 1000 };
+    return { ...player, bfbValue: Math.round(bfbValue * 1000) };
   });
 };
 
