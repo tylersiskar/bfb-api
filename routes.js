@@ -283,6 +283,20 @@ router.post(
         ContentType: "image/png",
       });
       await s3.send(command);
+
+      try {
+        await fetch("https://api.groupme.com/v3/bots/post", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            bot_id: process.env.GROUPME_BOT_ID,
+            text: `A new mock draft has been created!\nbadfranchisebuilders.com/mocks/${req.mockId}`,
+          }),
+        });
+      } catch (notifyErr) {
+        console.error("GroupMe notification failed:", notifyErr);
+      }
+
       res.json({ message: "Success", url: S3_THUMBNAIL_URL.replace("{IMAGE}", req.filename) });
     } catch (err) {
       res.status(500).send({ error: err });
