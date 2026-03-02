@@ -5,6 +5,21 @@ import { spawn } from "child_process";
 
 const { Pool } = pg;
 
+const GROUPME_BOT_ID = "e92a725c167cdf60e08d1b5a1c";
+
+async function sendGroupMe(text) {
+  try {
+    const res = await fetch("https://api.groupme.com/v3/bots/post", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bot_id: GROUPME_BOT_ID, text }),
+    });
+    if (!res.ok) console.error("GroupMe post failed:", res.status);
+  } catch (err) {
+    console.error("GroupMe post error:", err);
+  }
+}
+
 const pool = new Pool({
   user: process.env.PG_USER,
   host: process.env.PG_HOST,
@@ -211,8 +226,10 @@ function startCronJobs() {
     console.log("[cron] Running nightly league sync...");
     try {
       await syncLeague(leagueId);
+      await sendGroupMe("Nightly league sync complete.");
     } catch (err) {
       console.error("[cron] League sync error:", err);
+      await sendGroupMe(`Nightly league sync FAILED: ${err.message}`);
     }
   });
 
@@ -223,8 +240,10 @@ function startCronJobs() {
       await updatePlayerStats();
       await updateNflPlayers();
       await runKtcScraper();
+      await sendGroupMe("Weekly player update complete (stats, players, KTC).");
     } catch (err) {
       console.error("[cron] Weekly player update error:", err);
+      await sendGroupMe(`Weekly player update FAILED: ${err.message}`);
     }
   });
 
