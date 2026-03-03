@@ -31,7 +31,7 @@ const pool = new Pool({
 async function updatePlayerStats(year = new Date().getFullYear()) {
   console.log("Start Update Player Stats.");
   const statsResponse = await fetch(
-    `https://api.sleeper.app/v1/stats/nfl/regular/${year}`
+    `https://api.sleeper.app/v1/stats/nfl/regular/${year}`,
   );
   const stats = await statsResponse.json();
   const client = await pool.connect();
@@ -48,7 +48,7 @@ async function updatePlayerStats(year = new Date().getFullYear()) {
           player.gp ?? player.gs ?? player.gms_active,
           player.pts_half_ppr,
           year,
-        ]
+        ],
       );
     }
     await client.query("COMMIT");
@@ -81,7 +81,7 @@ async function updateNflPlayers() {
           player.team,
           player.active,
           player.years_exp,
-        ]
+        ],
       );
     }
     await client.query("COMMIT");
@@ -115,40 +115,63 @@ async function syncLeague(leagueId) {
   const client = await pool.connect();
   try {
     // 1. League info
-    const leagueRes = await fetch(`https://api.sleeper.app/v1/league/${leagueId}`);
+    const leagueRes = await fetch(
+      `https://api.sleeper.app/v1/league/${leagueId}`,
+    );
     const league = await leagueRes.json();
     await client.query(
       `INSERT INTO leagues (id, name, season, total_rosters, synced_at)
        VALUES ($1, $2, $3, $4, NOW())
        ON CONFLICT (id) DO UPDATE SET name = $2, season = $3, total_rosters = $4, synced_at = NOW()`,
-      [league.league_id, league.name, parseInt(league.season), league.total_rosters]
+      [
+        league.league_id,
+        league.name,
+        parseInt(league.season),
+        league.total_rosters,
+      ],
     );
 
     // 2. Users
-    const usersRes = await fetch(`https://api.sleeper.app/v1/league/${leagueId}/users`);
+    const usersRes = await fetch(
+      `https://api.sleeper.app/v1/league/${leagueId}/users`,
+    );
     const users = await usersRes.json();
     for (const user of users) {
       await client.query(
         `INSERT INTO league_users (user_id, league_id, display_name, avatar, roster_id)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (user_id, league_id) DO UPDATE SET display_name = $3, avatar = $4, roster_id = $5`,
-        [user.user_id, leagueId, user.display_name, user.avatar, user.roster_id ?? null]
+        [
+          user.user_id,
+          leagueId,
+          user.display_name,
+          user.avatar,
+          user.roster_id ?? null,
+        ],
       );
     }
 
     // 3. Draft order (offseason: real slot assignments; in-season: null)
-    const draftsRes = await fetch(`https://api.sleeper.app/v1/league/${leagueId}/drafts`);
-    const drafts = await draftsRes.json();
-    const upcomingDraft = drafts.find((d) => d.status === "pre_draft" || d.status === "drafting")
-      ?? drafts.find((d) => d.slot_to_roster_id && Object.keys(d.slot_to_roster_id).length > 0);
-    const draftOrder = upcomingDraft?.slot_to_roster_id ?? null;
-    await client.query(
-      `UPDATE leagues SET draft_order = $1 WHERE id = $2`,
-      [draftOrder ? JSON.stringify(draftOrder) : null, leagueId],
+    const draftsRes = await fetch(
+      `https://api.sleeper.app/v1/league/${leagueId}/drafts`,
     );
+    const drafts = await draftsRes.json();
+    const upcomingDraft =
+      drafts.find((d) => d.status === "pre_draft" || d.status === "drafting") ??
+      drafts.find(
+        (d) =>
+          d.slot_to_roster_id && Object.keys(d.slot_to_roster_id).length > 0,
+      );
+    const draftOrder = upcomingDraft?.slot_to_roster_id ?? null;
+    await client.query(`UPDATE leagues SET draft_order = $1 WHERE id = $2`, [
+      draftOrder ? JSON.stringify(draftOrder) : null,
+      leagueId,
+    ]);
 
     // 4. Rosters + picks
-    const rostersRes = await fetch(`https://api.sleeper.app/v1/league/${leagueId}/rosters`);
+    const rostersRes = await fetch(
+      `https://api.sleeper.app/v1/league/${leagueId}/rosters`,
+    );
     const rosters = await rostersRes.json();
 
     for (const roster of rosters) {
@@ -166,7 +189,7 @@ async function syncLeague(leagueId) {
           roster.settings?.losses ?? 0,
           roster.settings?.ties ?? 0,
           roster.settings?.fpts ?? 0,
-        ]
+        ],
       );
     }
 
@@ -176,14 +199,21 @@ async function syncLeague(leagueId) {
       ? parseInt(upcomingDraft.season)
       : parseInt(league.season) + 1;
 
-    const tradedPicksRes = await fetch(`https://api.sleeper.app/v1/league/${leagueId}/traded_picks`);
+    const tradedPicksRes = await fetch(
+      `https://api.sleeper.app/v1/league/${leagueId}/traded_picks`,
+    );
     const tradedPicks = await tradedPicksRes.json();
     console.log(`[sync] ${tradedPicks.length} traded picks found`);
 
     // Collect all seasons we need base rows for (upcoming draft + any future traded seasons)
-    const seasons = new Set([pickSeason, ...tradedPicks.map((p) => parseInt(p.season))]);
+    const seasons = new Set([
+      pickSeason,
+      ...tradedPicks.map((p) => parseInt(p.season)),
+    ]);
 
-    await client.query("DELETE FROM draft_picks WHERE league_id = $1", [leagueId]);
+    await client.query("DELETE FROM draft_picks WHERE league_id = $1", [
+      leagueId,
+    ]);
 
     // Generate all picks for every relevant season — every team owns their own by default
     for (const season of seasons) {
@@ -193,7 +223,7 @@ async function syncLeague(leagueId) {
             `INSERT INTO draft_picks (league_id, season, round, original_roster_id, current_roster_id)
              VALUES ($1, $2, $3, $4, $4)
              ON CONFLICT (league_id, season, round, original_roster_id) DO NOTHING`,
-            [leagueId, season, round, roster.roster_id]
+            [leagueId, season, round, roster.roster_id],
           );
         }
       }
@@ -205,7 +235,13 @@ async function syncLeague(leagueId) {
         `INSERT INTO draft_picks (league_id, season, round, original_roster_id, current_roster_id)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (league_id, season, round, original_roster_id) DO UPDATE SET current_roster_id = $5`,
-        [leagueId, parseInt(pick.season), pick.round, pick.roster_id, pick.owner_id]
+        [
+          leagueId,
+          parseInt(pick.season),
+          pick.round,
+          pick.roster_id,
+          pick.owner_id,
+        ],
       );
     }
 
@@ -222,16 +258,16 @@ function startCronJobs() {
   const leagueId = process.env.LEAGUE_ID;
 
   // Daily midnight — keep rosters/picks fresh
-  cron.schedule("0 0 * * *", async () => {
-    console.log("[cron] Running nightly league sync...");
-    try {
-      await syncLeague(leagueId);
-      await sendGroupMe("Nightly league sync complete.");
-    } catch (err) {
-      console.error("[cron] League sync error:", err);
-      await sendGroupMe(`Nightly league sync FAILED: ${err.message}`);
-    }
-  });
+  // cron.schedule("0 0 * * *", async () => {
+  //   console.log("[cron] Running nightly league sync...");
+  //   try {
+  //     await syncLeague(leagueId);
+  //     await sendGroupMe("Nightly league sync complete.");
+  //   } catch (err) {
+  //     console.error("[cron] League sync error:", err);
+  //     await sendGroupMe(`Nightly league sync FAILED: ${err.message}`);
+  //   }
+  // });
 
   // Tuesday 6am — update player stats, NFL players, and KTC values
   cron.schedule("0 6 * * 2", async () => {
