@@ -1,14 +1,8 @@
 import { exec } from "../db.js";
 import { spawn } from "child_process";
 import pg from "pg";
-import {
-  _getGoogleSheetClient,
-  _readGoogleSheet,
-  _writeGoogleSheet,
-} from "../google-sheets.js";
 
 const { Pool } = pg;
-const GOOGLE_SHEET_ID = "1LVIwS0t--qsD-0tZbC2LSXFbf1NstSasmesChmJbn9w";
 
 const pool = new Pool({
   user: process.env.PG_USER,
@@ -85,7 +79,7 @@ export const updatePlayerRankings = async (req, res) => {
       await client.query("COMMIT");
       console.log("Update Players Complete.");
 
-      const pythonProcess = spawn("python", ["ktc_scraper.py"]);
+      const pythonProcess = spawn("python", ["scripts/ktc_scraper.py"]);
       pythonProcess.stderr.on("data", (data) =>
         console.error(`stderr: ${data}`),
       );
@@ -112,78 +106,3 @@ export const updatePlayerRankings = async (req, res) => {
   }
 };
 
-export const getRedraft = async (req, res) => {
-  try {
-    const googleSheetClient = await _getGoogleSheetClient();
-    const data = await _readGoogleSheet(
-      googleSheetClient,
-      GOOGLE_SHEET_ID,
-      "Redraft",
-      "A:I",
-    );
-    res.json(data);
-  } catch (error) {
-    console.error("Error fetching redraft:", error);
-    res.status(500).send({ error, message: "Internal Server Error" });
-  }
-};
-
-export const getDynasty = async (req, res) => {
-  try {
-    const googleSheetClient = await _getGoogleSheetClient();
-    const data = await _readGoogleSheet(
-      googleSheetClient,
-      GOOGLE_SHEET_ID,
-      "Dynasty",
-      "A:I",
-    );
-    res.json(data);
-  } catch (error) {
-    console.error("Error fetching dynasty:", error);
-    res.status(500).send({ error, message: "Internal Server Error" });
-  }
-};
-
-export const calculate = async (req, res) => {
-  try {
-    const googleSheetClient = await _getGoogleSheetClient();
-    const { activeRoster, draftedPlayers } = req.body;
-    const values = [
-      ...activeRoster.map((obj) => [`${obj.first_name} ${obj.last_name}`]),
-      [""],
-    ];
-    await _writeGoogleSheet(
-      googleSheetClient,
-      GOOGLE_SHEET_ID,
-      "BFB",
-      "A:A",
-      values,
-    );
-
-    setTimeout(async () => {
-      const csvData = await _readGoogleSheet(
-        googleSheetClient,
-        GOOGLE_SHEET_ID,
-        "BFB Draft Board",
-        "A:E",
-      );
-      const headers = csvData[1];
-      const result = csvData
-        .slice(2)
-        .map((row) => Object.fromEntries(headers.map((h, i) => [h, row[i]])));
-      const draftedNames = new Set(
-        draftedPlayers.map((p) => `${p.first_name} ${p.last_name}`),
-      );
-      const finalResult = result.filter((player) => {
-        const baseName = player["PLAYER NAME"].replace(
-          / (Jr\.|Sr\.|II|III)$/,
-          "",
-        );
-        return !draftedNames.has(baseName);
-      });
-      res.json(finalResult);
-    }, 3000);
-  } catch (error) {
-    res.status(500).send(error.toString());
-  }
-};

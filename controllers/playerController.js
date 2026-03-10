@@ -1,5 +1,6 @@
 import { exec } from "../db.js";
 import { computePlayerValues } from "../utils/calculations.js";
+import { enrichWithKeeperValues } from "../utils/keeperValues.js";
 
 export const getAllPlayers = async (req, res) => {
   try {
@@ -24,7 +25,8 @@ export const getAllPlayers = async (req, res) => {
     }
 
     const data = await exec(sqlQuery, bindParams);
-    res.json(computePlayerValues(data));
+    const withValues = computePlayerValues(data);
+    res.json(enrichWithKeeperValues(withValues));
   } catch (error) {
     console.error("Error fetching players:", error);
     res.status(500).send({ error, message: "Internal Server Error" });

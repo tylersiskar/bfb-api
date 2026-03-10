@@ -2,6 +2,5 @@
 yarn.lock
 .env
 /env/
-private.json
-updateProd.txt
+/output/
 deploy.sh

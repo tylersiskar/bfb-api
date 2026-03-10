@@ -2,6 +2,7 @@ import fetch from "node-fetch";
 import pg from "pg";
 import cron from "node-cron";
 import { spawn } from "child_process";
+import { runKeeperModel } from "./utils/pythonBridge.js";
 
 const { Pool } = pg;
 
@@ -96,7 +97,7 @@ async function updateNflPlayers() {
 
 async function runKtcScraper() {
   return new Promise((resolve, reject) => {
-    const proc = spawn("python", ["ktc_scraper.py"]);
+    const proc = spawn("python", ["scripts/ktc_scraper.py"]);
     proc.stderr.on("data", (d) => console.error(`ktc_scraper stderr: ${d}`));
     proc.on("close", (code) => {
       if (code === 0) {
@@ -276,7 +277,12 @@ function startCronJobs() {
       await updatePlayerStats();
       await updateNflPlayers();
       await runKtcScraper();
-      await sendGroupMe("Weekly player update complete (stats, players, KTC).");
+      try {
+        await runKeeperModel();
+      } catch (kmErr) {
+        console.warn("[cron] Keeper model failed (CSV from last deploy will be used):", kmErr.message);
+      }
+      await sendGroupMe("Weekly player update complete (stats, players, KTC, keeper values).");
     } catch (err) {
       console.error("[cron] Weekly player update error:", err);
       await sendGroupMe(`Weekly player update FAILED: ${err.message}`);

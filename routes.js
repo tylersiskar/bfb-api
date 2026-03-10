@@ -4,6 +4,7 @@ import * as statsController from "./controllers/statsController.js";
 import * as mockController from "./controllers/mockController.js";
 import * as leagueController from "./controllers/leagueController.js";
 import * as tradeController from "./controllers/tradeController.js";
+import * as keeperController from "./controllers/keeperController.js";
 
 const router = express.Router();
 
@@ -19,9 +20,6 @@ router.post(
   statsController.updatePlayerRankings,
 );
 router.get("/stats/:year", statsController.getStats);
-router.get("/redraft", statsController.getRedraft);
-router.get("/dynasty", statsController.getDynasty);
-router.post("/calculate", statsController.calculate);
 
 // Mocks
 router.post(
@@ -37,6 +35,10 @@ router.get("/league/:leagueId/rosters", leagueController.getRosters);
 router.get("/league/:leagueId/standings", leagueController.getStandings);
 router.get("/league/:leagueId/draft-picks", leagueController.getDraftPicks);
 router.get("/league/:leagueId/keeper-scores", leagueController.getKeeperScores);
+
+// Keeper Value Model
+router.post("/keeper-model/run", keeperController.runModel);
+router.get("/keeper-model/status", keeperController.getStatus);
 
 // Trade
 router.post("/trade/calculate", tradeController.calculateTrade);
