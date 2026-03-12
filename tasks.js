@@ -97,17 +97,21 @@ async function updateNflPlayers() {
 
 async function runKtcScraper() {
   return new Promise((resolve, reject) => {
-    const proc = spawn("python", ["scripts/ktc_scraper.py"]);
-    proc.stderr.on("data", (d) => console.error(`ktc_scraper stderr: ${d}`));
+    const proc = spawn("python3", ["scripts/ktc_scraper.py"]);
+    let stderr = "";
+    proc.stderr.on("data", (d) => {
+      stderr += d.toString();
+      console.error(`ktc_scraper stderr: ${d}`);
+    });
     proc.on("close", (code) => {
       if (code === 0) {
         console.log("KTC scraper complete.");
         resolve();
       } else {
-        reject(new Error(`KTC scraper exited with code ${code}`));
+        reject(new Error(`KTC scraper exited with code ${code}: ${stderr.slice(-200)}`));
       }
     });
-    proc.on("error", reject);
+    proc.on("error", (err) => reject(new Error(`KTC scraper failed to start: ${err.message}`)));
   });
 }
 
