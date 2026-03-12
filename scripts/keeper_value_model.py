@@ -41,9 +41,9 @@ FLEX_ELIGIBLE = ["RB", "WR", "TE"]
 
 # positional weights for composite score
 WEIGHTS = {
-    "current_season": 0.50,
+    "current_season": 0.55,
     "longevity":      0.25,
-    "scarcity":       0.15,
+    "scarcity":       0.10,
     "durability":     0.10,
 }
 
@@ -198,47 +198,44 @@ def merge_bio_data(stats_df, rosters_df):
 
 # ── 2. AGING CURVES ────────────────────────────────────────────────────────
 
+# Research-based positional aging curves (pct of peak production).
+# Sources: Baldwin/PFF aging studies, historical fantasy data analysis.
+# The delta method with limited data produces unreliable curves (especially
+# for RBs where year-over-year deltas are always negative), so we use
+# well-established consensus curves instead.
+DEFAULT_AGING_CURVES = {
+    "QB": {
+        21: 0.55, 22: 0.65, 23: 0.75, 24: 0.85, 25: 0.92, 26: 0.97,
+        27: 1.0, 28: 0.99, 29: 0.97, 30: 0.94, 31: 0.90, 32: 0.85,
+        33: 0.79, 34: 0.72, 35: 0.64, 36: 0.55, 37: 0.45, 38: 0.35,
+        39: 0.25, 40: 0.15,
+    },
+    "RB": {
+        21: 0.80, 22: 0.90, 23: 0.97, 24: 1.0, 25: 0.97, 26: 0.90,
+        27: 0.82, 28: 0.72, 29: 0.60, 30: 0.48, 31: 0.37, 32: 0.27,
+        33: 0.18, 34: 0.10, 35: 0.05,
+    },
+    "WR": {
+        21: 0.60, 22: 0.72, 23: 0.83, 24: 0.92, 25: 0.97, 26: 1.0,
+        27: 0.98, 28: 0.94, 29: 0.88, 30: 0.80, 31: 0.70, 32: 0.58,
+        33: 0.45, 34: 0.33, 35: 0.22, 36: 0.12,
+    },
+    "TE": {
+        21: 0.50, 22: 0.60, 23: 0.70, 24: 0.80, 25: 0.90, 26: 0.96,
+        27: 1.0, 28: 0.97, 29: 0.92, 30: 0.85, 31: 0.76, 32: 0.65,
+        33: 0.53, 34: 0.40, 35: 0.28, 36: 0.17,
+    },
+}
+
+
 def build_aging_curves(df):
     """
-    Build positional aging curves using the delta method:
-    For each player-season pair, compute the year-over-year change in
-    fantasy points and average those deltas by position and age.
-    Returns a dict of {position: {age: expected_pct_of_peak}}.
+    Returns research-based positional aging curves.
+    The data-derived delta method is unreliable with limited seasons
+    (RBs produce all-negative cumulative curves), so we use hardcoded
+    consensus curves from fantasy analytics research.
     """
-    curves = {}
-
-    for pos in POSITIONS:
-        pos_df = df[df["position"] == pos].copy()
-        pos_df = pos_df.dropna(subset=["age", "fantasy_points_half_ppr"])
-        pos_df = pos_df.sort_values(["player_name", "season"])
-
-        # Year-over-year deltas
-        pos_df["prev_fp"] = pos_df.groupby("player_name")["fantasy_points_half_ppr"].shift(1)
-        pos_df["delta"] = pos_df["fantasy_points_half_ppr"] - pos_df["prev_fp"]
-        pos_df = pos_df.dropna(subset=["delta"])
-
-        # Average delta by age
-        avg_delta = pos_df.groupby("age")["delta"].mean()
-
-        # Build cumulative curve, normalized so peak = 1.0
-        ages = sorted(avg_delta.index)
-        if not ages:
-            curves[pos] = {}
-            continue
-
-        cumulative = {}
-        running = 0
-        for a in ages:
-            running += avg_delta.get(a, 0)
-            cumulative[int(a)] = running
-
-        # Normalize to peak
-        peak = max(cumulative.values()) if cumulative else 1
-        if peak <= 0:
-            peak = 1
-        curves[pos] = {a: round(v / peak, 3) for a, v in cumulative.items()}
-
-    return curves
+    return DEFAULT_AGING_CURVES
 
 
 def get_expected_production_curve(curves, position, current_age):
@@ -310,6 +307,13 @@ def calculate_positional_scarcity(df, season):
         else:
             scarcity[pos] = round(starter_avg / max(1, 1), 2)
 
+    # Weight by roster demand: positions with more starter slots are scarcer
+    # in a keeper league. This prevents 1-QB leagues from over-valuing QBs.
+    max_demand = max(demand.values()) if demand else 1
+    for pos in POSITIONS:
+        demand_weight = demand.get(pos, 12) / max_demand
+        scarcity[pos] = round(scarcity.get(pos, 1.0) * demand_weight, 2)
+
     max_s = max(scarcity.values()) if scarcity else 1
     return {pos: round(v / max_s, 3) for pos, v in scarcity.items()}
 
@@ -358,10 +362,10 @@ def build_draft_value_lookup():
 
 # Positional multiplier for draft capital in keeper leagues
 # RB/WR drafted high are more valuable as keepers than QBs (1-QB league)
-DRAFT_POS_MULTIPLIER = {"QB": 0.75, "RB": 1.15, "WR": 1.10, "TE": 1.0}
+DRAFT_POS_MULTIPLIER = {"QB": 0.75, "RB": 1.15, "WR": 1.10, "TE": 0.80}
 
 # Cap on draft capital score — rookies shouldn't outscore proven elite producers
-DRAFT_CAPITAL_CAP = 0.55
+DRAFT_CAPITAL_CAP = 0.60
 
 
 def calculate_draft_capital_score(player_row, draft_value_lookup, latest_season):
@@ -425,9 +429,13 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
     For younger players (<5 years exp): only use the most recent season.
     Returns (weighted_full_season_fp, total_games) or (None, 0) if no data.
     """
-    # Young players: only use the most recent season
-    if years_exp <= 4:
+    # Young players (3 or fewer years): only use the most recent season.
+    # Year 4: use 2 seasons with heavy recency (drops oldest bad season).
+    # Year 5+: use all 3 seasons.
+    if years_exp <= 3:
         n_seasons = 1
+    elif years_exp <= 4:
+        n_seasons = 2
 
     player_seasons = df[
         (df["player_name"] == player_name)
@@ -438,14 +446,53 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
     if player_seasons.empty:
         return None, 0
 
-    # Veterans 7+ years: equal weight across 3 seasons
-    # Veterans 5-6 years: recency-weighted; QBs use 2x/2x/1x, others use 3x/2x/1x
+    # Outlier detection: drop at most 1 season if it's a statistical outlier.
+    # Catches one-off down years (>40% below median) AND one-off good years
+    # that aren't the most recent (>60% above median of others).
+    if len(player_seasons) >= 3:
+        season_ppgs = []
+        for _, r in player_seasons.iterrows():
+            fp = r.get("fantasy_points_half_ppr", 0)
+            gp = pd.to_numeric(r.get("games", 0), errors="coerce")
+            if pd.isna(gp) or gp < 1 or fp <= 0:
+                continue
+            season_ppgs.append((r["season"], fp / gp))
+
+        if len(season_ppgs) >= 3:
+            outlier_season = None
+
+            # Check for outlier good season first (non-recent fluke inflates value)
+            best_season, best_ppg = max(season_ppgs, key=lambda x: x[1])
+            if best_season != latest_season:
+                others = [ppg for s, ppg in season_ppgs if s != best_season]
+                median_others = sorted(others)[len(others) // 2]
+                if median_others > 0 and best_ppg > median_others * 1.60:
+                    outlier_season = best_season
+
+            # Check for outlier bad season (one-off down year)
+            if outlier_season is None:
+                worst_season, worst_ppg = min(season_ppgs, key=lambda x: x[1])
+                others = [ppg for s, ppg in season_ppgs if s != worst_season]
+                median_others = sorted(others)[len(others) // 2]
+                if median_others > 0 and worst_ppg < median_others * 0.60:
+                    outlier_season = worst_season
+
+            if outlier_season is not None:
+                player_seasons = player_seasons[player_seasons["season"] != outlier_season]
+
+    # Recency-weighted season weights by experience tier
     if years_exp >= 7:
-        season_weights = {latest_season: 1.0, latest_season - 1: 1.0, latest_season - 2: 1.0}
-    elif position == "QB":
-        season_weights = {latest_season: 2.0, latest_season - 1: 2.0, latest_season - 2: 1.0}
+        # Established vets: favor recency but still smooth
+        season_weights = {latest_season: 2.0, latest_season - 1: 1.5, latest_season - 2: 1.0}
+    elif years_exp >= 5:
+        # Mid-career: heavy recency weighting
+        if position == "QB":
+            season_weights = {latest_season: 3.0, latest_season - 1: 2.0, latest_season - 2: 1.0}
+        else:
+            season_weights = {latest_season: 4.0, latest_season - 1: 1.5, latest_season - 2: 1.0}
     else:
-        season_weights = {latest_season: 3.0, latest_season - 1: 2.0, latest_season - 2: 1.0}
+        # years_exp == 4: only 2 seasons used (n_seasons=2)
+        season_weights = {latest_season: 3.0, latest_season - 1: 1.0}
     weighted_ppg_sum = 0.0
     weight_sum = 0.0
 
@@ -518,7 +565,7 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
             weighted_fp = ppg * 17
 
         confidence = min(gp / MIN_GAMES, 1.0)
-        qualified.append({"row": row, "pos": pos, "gp": gp, "full_season_fp": weighted_fp, "confidence": confidence, "name": name})
+        qualified.append({"row": row, "pos": pos, "gp": gp, "full_season_fp": weighted_fp, "confidence": confidence, "name": name, "years_exp": years_exp})
 
     # ── Compute replacement-level FP per position
     pos_fps = defaultdict(list)
@@ -538,12 +585,34 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         else:
             replacement_fp[pos] = 0
 
-    # ── Compute max VOR across all positions for normalization
-    max_vor = 1
+    # ── Compute max VOR globally for normalizing current_value and longevity.
+    # Global normalization ensures TEs/QBs naturally rank lower than RBs/WRs
+    # without relying solely on scarcity weights.
+    max_vor_by_pos = defaultdict(lambda: 1)
     for q in qualified:
         vor = q["full_season_fp"] - replacement_fp.get(q["pos"], 0)
-        if vor > max_vor:
-            max_vor = vor
+        if vor > max_vor_by_pos[q["pos"]]:
+            max_vor_by_pos[q["pos"]] = vor
+    max_vor_global = max(max_vor_by_pos.values()) if max_vor_by_pos else 1
+
+    # ── Compute positional VOR ranks for elite tier bonus
+    pos_vor_ranked = {}
+    for pos in POSITIONS:
+        pos_q = sorted(
+            [q for q in qualified if q["pos"] == pos],
+            key=lambda q: q["full_season_fp"] - replacement_fp.get(pos, 0),
+            reverse=True,
+        )
+        for rank_idx, q in enumerate(pos_q):
+            pos_vor_ranked[q["name"]] = rank_idx + 1  # 1-based
+
+    # Elite tier bonus: top-5 positional players get a bonus scaled by starter demand.
+    # Positions with more starter slots (RB, WR) reward elite status more than TE/QB.
+    flex_share = STARTERS.get("FLEX", 0) / len(FLEX_ELIGIBLE) if FLEX_ELIGIBLE else 0
+    pos_demand = {}
+    for pos in POSITIONS:
+        pos_demand[pos] = STARTERS.get(pos, 0) + (flex_share if pos in FLEX_ELIGIBLE else 0)
+    max_demand = max(pos_demand.values()) if pos_demand else 1
 
     results = []
 
@@ -556,6 +625,7 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         gp = q["gp"]
         full_season_fp = q["full_season_fp"]
         confidence = q["confidence"]
+        years_exp = q["years_exp"]
 
         if pd.isna(age):
             age = 27
@@ -563,7 +633,11 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
 
         repl = replacement_fp.get(pos, 0)
         vor = max(full_season_fp - repl, 0)
-        current_value = vor / max_vor
+        # Rookies near replacement get partial VOR credit (soft landing instead
+        # of hard zero) — a rookie producing at 80%+ of replacement likely improves
+        if vor == 0 and years_exp <= 1 and repl > 0 and full_season_fp >= repl * 0.75:
+            vor = (full_season_fp - repl * 0.75) * 0.5
+        current_value = vor / max_vor_global
 
         prod_curve = get_expected_production_curve(curves, pos, age)
         if vor > 0:
@@ -572,7 +646,7 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
                 future_fp = full_season_fp * mult
                 future_vor = max(future_fp - repl, 0)
                 future_value += future_vor * ((1 - DISCOUNT_RATE) ** y)
-            max_longevity = max_vor * PROJECTION_YEARS
+            max_longevity = max_vor_global * PROJECTION_YEARS
             longevity_score = min(future_value / max(max_longevity, 1), 1.0)
         else:
             longevity_score = 0.0
@@ -596,13 +670,33 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
                 if dc:
                     draft_score = dc["draft_score"]
 
-        production_weight = min(gp / DRAFT_BLEND_GAMES, 1.0)
-        composite = production_weight * production_score + (1 - production_weight) * draft_score
+        # Experience-based draft capital blending:
+        # Rookies get draft capital weight that fades as games are played.
+        # Fade floor depends on whether production is near replacement level:
+        # - Near/above replacement: draft capital stays relevant (rookie upside)
+        # - Well below replacement: draft capital fades aggressively (bust signal)
+        EXPERIENCE_DRAFT_WEIGHT = {0: 0.40, 1: 0.20, 2: 0.10}
+        draft_weight = EXPERIENCE_DRAFT_WEIGHT.get(years_exp, 0.0)
+        games_played_fade = max(1.0 - gp / DRAFT_BLEND_GAMES, 0.0)
+        if years_exp == 0 and full_season_fp >= repl * 0.75:
+            min_fade = 0.50
+        else:
+            min_fade = 0.15
+        adjusted_draft_weight = draft_weight * max(games_played_fade, min_fade)
+        composite = (1 - adjusted_draft_weight) * production_score + adjusted_draft_weight * draft_score
+
+        # Elite tier bonus: top-5 at position get a bump, scaled by demand
+        pos_rank = pos_vor_ranked.get(name, 99)
+        if pos_rank <= 5:
+            demand_factor = pos_demand.get(pos, 1) / max_demand
+            elite_bonus = 0.12 * demand_factor * (6 - pos_rank) / 5
+            composite += elite_bonus
 
         results.append({
             "player_name": name,
             "position": pos,
             "age": age,
+            "years_exp": years_exp,
             "season": latest_season,
             "games_played": gp,
             "fantasy_points": round(full_season_fp, 1),
@@ -643,6 +737,7 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
                 "player_name": name,
                 "position": pos,
                 "age": age,
+                "years_exp": 0,
                 "season": latest_season,
                 "games_played": 0,
                 "fantasy_points": 0.0,

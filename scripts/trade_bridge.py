@@ -15,73 +15,35 @@ import os
 # Ensure we can import from the same directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from trade_calculator import TradeCalculator, REPLACEMENT_LEVEL, ELITE_EXPONENT
+from trade_calculator import TradeCalculator, REPLACEMENT_LEVEL
 
 
 def evaluate_trade(data):
     """Evaluate a trade between two sides."""
     calc = TradeCalculator()
 
-    team_a_roster = data["team_a_roster"]
-    team_b_roster = data["team_b_roster"]
-    a_gives = data["a_gives"]
-    b_gives = data["b_gives"]
-    team_a_name = data.get("team_a_name", "Side A")
-    team_b_name = data.get("team_b_name", "Side B")
-
     result = calc.evaluate_trade(
-        team_a_roster, team_b_roster,
-        a_gives, b_gives,
-        team_a_name, team_b_name,
+        team_a_roster=data["team_a_roster"],
+        team_b_roster=data["team_b_roster"],
+        a_gives=data["a_gives"],
+        b_gives=data["b_gives"],
+        team_a_name=data.get("team_a_name", "Side A"),
+        team_b_name=data.get("team_b_name", "Side B"),
+        a_picks=data.get("a_picks", []),
+        b_picks=data.get("b_picks", []),
     )
 
-    return {
-        "verdict": result.verdict,
-        "win_now_verdict": result.win_now_verdict,
-        "dynasty_verdict": result.dynasty_verdict,
-        "side_a": {
-            "giving_value": result.a_giving_value,
-            "lineup_before": result.a_lineup_before,
-            "lineup_after": result.a_lineup_after,
-            "lineup_delta": result.a_lineup_delta,
-            "keeper_before": result.a_keeper_before,
-            "keeper_after": result.a_keeper_after,
-            "keeper_delta": round(result.a_keeper_after - result.a_keeper_before, 3),
-            "starters_after": [
-                {
-                    "player_name": s["player_name"],
-                    "position": s.get("position", ""),
-                    "slot": s.get("slot", ""),
-                    "weekly_avg": s.get("weekly_avg", 0),
-                }
-                for s in result.a_starters_after
-            ],
-        },
-        "side_b": {
-            "giving_value": result.b_giving_value,
-            "lineup_before": result.b_lineup_before,
-            "lineup_after": result.b_lineup_after,
-            "lineup_delta": result.b_lineup_delta,
-            "keeper_before": result.b_keeper_before,
-            "keeper_after": result.b_keeper_after,
-            "keeper_delta": round(result.b_keeper_after - result.b_keeper_before, 3),
-            "starters_after": [
-                {
-                    "player_name": s["player_name"],
-                    "position": s.get("position", ""),
-                    "slot": s.get("slot", ""),
-                    "weekly_avg": s.get("weekly_avg", 0),
-                }
-                for s in result.b_starters_after
-            ],
-        },
-    }
+    return result.to_dict()
 
 
 def get_player_value(data):
     """Get a single player's trade value profile."""
     calc = TradeCalculator()
-    result = calc.get_player_value(data["player_name"], data.get("position"))
+    result = calc.get_player_value(
+        data["player_name"],
+        data.get("position"),
+        bfb_value=data.get("bfb_value"),
+    )
     return result
 
 

@@ -42,6 +42,8 @@ function loadKeeperValues() {
         current_value: parseFloat(row.current_value) || 0,
         projected_years_elite: parseInt(row.projected_years_elite) || 0,
         keeper_fantasy_points: parseFloat(row.fantasy_points) || 0,
+        years_exp: parseInt(row.years_exp) || 0,
+        games_played: parseInt(row.games_played) || 0,
       });
     }
   }
@@ -98,6 +100,30 @@ export function enrichWithKeeperValues(players) {
 
     const kv = map.get(name.toLowerCase());
     if (!kv) return player;
+
+    const subScores = {
+      keeper_value: kv.keeper_value,
+      longevity_score: kv.longevity_score,
+      scarcity_score: kv.scarcity_score,
+      durability_score: kv.durability_score,
+      current_value: kv.current_value,
+      projected_years_elite: kv.projected_years_elite,
+    };
+
+    // Incoming rookies with 0 NFL games: keep KTC dynasty value
+    if (kv.years_exp === 0 && kv.games_played === 0) {
+      return { ...player, ...subScores };
+    }
+
+    // 1st-year players: 50/50 blend of KTC and model value
+    if (kv.years_exp <= 1) {
+      const ktcValue = player.value ? Number(player.value) : 0;
+      const modelValue = NORMALIZE_TO_KTC && maxKtc > 0
+        ? Math.round((kv.keeper_value / 1.0) * maxKtc)
+        : Math.round(kv.keeper_value * 10000);
+      const blendedValue = Math.round(0.5 * ktcValue + 0.5 * modelValue);
+      return { ...player, bfbValue: blendedValue, ...subScores };
+    }
 
     const rawValue = kv.keeper_value * 10000;
     // Scale keeper values into KTC range so both systems are comparable

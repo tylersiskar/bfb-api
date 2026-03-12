@@ -2,7 +2,9 @@ import { exec } from "../db.js";
 import {
   computePlayerValues,
   getPickValue,
-  diminishingTotal,
+  calculateTradeValue,
+  applyEliteCurve,
+  getPackageTax,
 } from "../utils/calculations.js";
 import { getPickSlotMap } from "../utils/pickSlots.js";
 import { enrichWithKeeperValues } from "../utils/keeperValues.js";
@@ -11,7 +13,7 @@ import { runTradeBridge } from "../utils/pythonBridge.js";
 const STARTER_COUNTS = { QB: 1, RB: 2, WR: 3, TE: 1 };
 
 /**
- * Build a roster list (player dicts with weekly_avg) from DB player rows.
+ * Build a roster list (player dicts with weekly_avg + bfb_value) from DB rows.
  * This is the format the Python trade calculator expects.
  */
 function toTradeRoster(players) {
@@ -22,6 +24,7 @@ function toTradeRoster(players) {
       ? Math.round((p.pts_half_ppr / Math.max(p.gms_active, 1)) * 10) / 10
       : 0,
     age: p.age ?? p.years_exp ? 22 + (p.years_exp ?? 0) : 27,
+    bfb_value: p.bfbValue ?? 0,
   }));
 }
 
@@ -49,7 +52,7 @@ export const calculateTrade = async (req, res) => {
     const sidePickValue = (picks) =>
       (picks ?? []).reduce((sum, pick) => {
         const slot = rosterToSlot[pick.current_roster_id] ?? 6;
-        return sum + getPickValue(pick.round, slot);
+        return sum + getPickValue(pick.round, slot, pick.years_out ?? 0);
       }, 0);
 
     // Build roster arrays for each side
@@ -59,7 +62,7 @@ export const calculateTrade = async (req, res) => {
     const aGiveNames = aPlayerObjs.map((p) => p.full_name || p.player_name);
     const bGiveNames = bPlayerObjs.map((p) => p.full_name || p.player_name);
 
-    // If we have rosters for both sides (league context), run full Python analysis
+    // If we have rosters for both sides, run full Python analysis
     let advancedAnalysis = null;
     if (league_id && side_a.roster_id && side_b.roster_id) {
       const rosters = await exec(
@@ -80,7 +83,8 @@ export const calculateTrade = async (req, res) => {
               [allRosterIds, year],
             )
           : [];
-        const rosterPlayerMap = Object.fromEntries(rosterPlayers.map((p) => [p.id, p]));
+        const enrichedRosterPlayers = enrichWithKeeperValues(computePlayerValues(rosterPlayers));
+        const rosterPlayerMap = Object.fromEntries(enrichedRosterPlayers.map((p) => [p.id, p]));
 
         const aFullRoster = toTradeRoster(aAllIds.map((id) => rosterPlayerMap[id]).filter(Boolean));
         const bFullRoster = toTradeRoster(bAllIds.map((id) => rosterPlayerMap[id]).filter(Boolean));
@@ -94,6 +98,16 @@ export const calculateTrade = async (req, res) => {
             b_gives: bGiveNames,
             team_a_name: side_a.name || "Side A",
             team_b_name: side_b.name || "Side B",
+            a_picks: (side_a.picks ?? []).map((p) => ({
+              round: p.round,
+              slot: rosterToSlot[p.roster_id] ?? 6,
+              years_out: p.years_out ?? 0,
+            })),
+            b_picks: (side_b.picks ?? []).map((p) => ({
+              round: p.round,
+              slot: rosterToSlot[p.roster_id] ?? 6,
+              years_out: p.years_out ?? 0,
+            })),
           });
         } catch (err) {
           console.warn("Python trade bridge failed, using JS fallback:", err.message);
@@ -101,27 +115,27 @@ export const calculateTrade = async (req, res) => {
       }
     }
 
-    // JS-based value calculation (always runs as baseline)
+    // ── JS-based value calculation (always runs as baseline) ──
+
     const tradeValue = (id) => playerMap[id]?.bfbValue ?? 0;
     const sortedValues = (ids) => ids.map(tradeValue).sort((a, b) => b - a);
 
     const aPlayerValues = sortedValues(side_a.players ?? []);
     const bPlayerValues = sortedValues(side_b.players ?? []);
 
-    const aTotal =
-      diminishingTotal(aPlayerValues) + sidePickValue(side_a.picks);
-    const bTotal =
-      diminishingTotal(bPlayerValues) + sidePickValue(side_b.picks);
-    const aBest = aPlayerValues[0] ?? 0;
-    const bBest = bPlayerValues[0] ?? 0;
+    const aPickVal = sidePickValue(side_a.picks);
+    const bPickVal = sidePickValue(side_b.picks);
 
-    const maxVal = Math.max(aBest, bBest, aTotal, bTotal, 1);
-    const aScore =
-      0.6 * (aBest / maxVal) + 0.4 * (aTotal / (aTotal + bTotal || 1));
-    const bScore =
-      0.6 * (bBest / maxVal) + 0.4 * (bTotal / (aTotal + bTotal || 1));
+    const bTotalAssets = (side_b.players ?? []).length + (side_b.picks ?? []).length;
+    const aTotalAssets = (side_a.players ?? []).length + (side_a.picks ?? []).length;
 
-    const fairness = Math.round((aScore / (aScore + bScore)) * 100);
+    const aSide = calculateTradeValue(aPlayerValues, aPickVal, bTotalAssets);
+    const bSide = calculateTradeValue(bPlayerValues, bPickVal, aTotalAssets);
+
+    // Fairness: 50 = perfectly fair, >50 = side A giving more, <50 = side B giving more
+    const totalValue = aSide.total + bSide.total || 1;
+    const fairness = Math.round((aSide.total / totalValue) * 100);
+
     const margin =
       Math.abs(fairness - 50) < 5
         ? "even"
@@ -131,31 +145,33 @@ export const calculateTrade = async (req, res) => {
             ? "moderate"
             : "significant";
 
+    const winner = fairness > 52 ? "side_a" : fairness < 48 ? "side_b" : "even";
+
     const response = {
       fairness,
-      winner: fairness > 50 ? "side_a" : fairness < 50 ? "side_b" : "even",
+      winner,
       margin,
       breakdown: {
-        best_player_edge:
-          aBest > bBest ? "side_a" : bBest > aBest ? "side_b" : "even",
-        total_value_edge:
-          aTotal > bTotal ? "side_a" : bTotal > aTotal ? "side_b" : "even",
-        side_a_value: Math.round(aTotal),
-        side_b_value: Math.round(bTotal),
-        side_a_picks_value: sidePickValue(side_a.picks),
-        side_b_picks_value: sidePickValue(side_b.picks),
+        side_a_value: aSide.total,
+        side_b_value: bSide.total,
+        side_a_raw_value: aSide.rawTotal,
+        side_b_raw_value: bSide.rawTotal,
+        side_a_picks_value: aPickVal,
+        side_b_picks_value: bPickVal,
+        side_a_tax: aSide.taxApplied ? aSide.taxRate : 0,
+        side_b_tax: bSide.taxApplied ? bSide.taxRate : 0,
       },
       players: withValues.map((p) => ({
         id: p.id,
         full_name: p.full_name,
         position: p.position,
         bfbValue: p.bfbValue,
+        tradeValue: applyEliteCurve(p.bfbValue ?? 0, Math.max(...aPlayerValues, ...bPlayerValues, 1)),
         keeper_value: p.keeper_value ?? null,
         longevity_score: p.longevity_score ?? null,
       })),
     };
 
-    // Merge advanced analysis from Python trade calculator if available
     if (advancedAnalysis && !advancedAnalysis.error) {
       response.advanced = advancedAnalysis;
     }
