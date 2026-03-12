@@ -270,22 +270,38 @@ function startCronJobs() {
   //   }
   // });
 
-  // Tuesday 6am — update player stats, NFL players, and KTC values
-  cron.schedule("0 6 * * 2", async () => {
-    console.log("[cron] Running weekly player update...");
+  // Daily 6am — update player stats, NFL players, and KTC values
+  cron.schedule("0 6 * * *", async () => {
+    console.log("[cron] Running daily player update...");
+    const failures = [];
     try {
       await updatePlayerStats();
-      await updateNflPlayers();
-      await runKtcScraper();
-      try {
-        await runKeeperModel();
-      } catch (kmErr) {
-        console.warn("[cron] Keeper model failed (CSV from last deploy will be used):", kmErr.message);
-      }
-      await sendGroupMe("Weekly player update complete (stats, players, KTC, keeper values).");
     } catch (err) {
-      console.error("[cron] Weekly player update error:", err);
-      await sendGroupMe(`Weekly player update FAILED: ${err.message}`);
+      console.error("[cron] updatePlayerStats failed:", err);
+      failures.push(`Stats: ${err.message}`);
+    }
+    try {
+      await updateNflPlayers();
+    } catch (err) {
+      console.error("[cron] updateNflPlayers failed:", err);
+      failures.push(`NFL Players: ${err.message}`);
+    }
+    try {
+      await runKtcScraper();
+    } catch (err) {
+      console.error("[cron] KTC scraper failed:", err);
+      failures.push(`KTC: ${err.message}`);
+    }
+    try {
+      await runKeeperModel();
+    } catch (err) {
+      console.warn("[cron] Keeper model failed:", err.message);
+      failures.push(`Keeper Model: ${err.message}`);
+    }
+    if (failures.length === 0) {
+      await sendGroupMe("Daily player update complete (stats, players, KTC, keeper values).");
+    } else {
+      await sendGroupMe(`Daily update partial failure:\n${failures.join("\n")}`);
     }
   });
 

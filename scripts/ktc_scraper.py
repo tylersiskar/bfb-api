@@ -1,27 +1,44 @@
 import requests
 from bs4 import BeautifulSoup
 import time
+import random
 import psycopg2
 from psycopg2 import extras
 import os
+import sys
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-# Database connection parameters
-dbname = os.getenv("PG_DB")
-user = os.getenv("PG_USER")
-password = os.getenv("PG_PASSWORD")
-host = os.getenv("PG_HOST")
-print(dbname, user, password, host)
-# Connect to your postgres DB
-conn = psycopg2.connect(dbname=dbname, user=user, password=password, host=host)
+# Rotate user agents to reduce bot detection risk
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15',
+]
 
-# A function to delete all records and insert new ones
+MAX_RETRIES = 3
 
 
-def insert_records(records):
+def connect_db():
+    dbname = os.getenv("PG_DB")
+    user = os.getenv("PG_USER")
+    password = os.getenv("PG_PASSWORD")
+    host = os.getenv("PG_HOST")
+
+    if not all([dbname, user, password, host]):
+        missing = [k for k, v in {"PG_DB": dbname, "PG_USER": user, "PG_PASSWORD": password, "PG_HOST": host}.items() if not v]
+        raise RuntimeError(f"Missing database env vars: {', '.join(missing)}")
+
+    return psycopg2.connect(dbname=dbname, user=user, password=password, host=host)
+
+
+def insert_records(conn, records):
+    if not records:
+        raise RuntimeError("No records to insert — scrape returned empty results")
+
     with conn:
         with conn.cursor() as cur:
             query = """
@@ -31,48 +48,55 @@ def insert_records(records):
             SET value = EXCLUDED.value, last_updated = NOW();
             """
 
-            # A list of tuples from the list of dictionaries
             values = [(record['name'], record['value'], 'NOW()')
                       for record in records]
 
             # Remove duplicates based on 'name'
             unique_records = {}
             for record in values:
-                name = record[0]  # 'name' is the first column
+                name = record[0]
                 unique_records[name] = record
 
             values = list(unique_records.values())
 
-            print("Execute Upsert.")
-            # Use execute_values() to perform the UPSERT
+            print(f"Upserting {len(values)} players into dynasty_rankings...")
             extras.execute_values(cur, query, values)
-
-            # Commit the transaction
             conn.commit()
+            print("Upsert complete.")
 
 
 def fetch_data(url):
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
     }
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=headers, timeout=30)
+
+    if response.status_code != 200:
+        raise RuntimeError(f"KTC returned HTTP {response.status_code} for {url}")
+
+    if 'cf-browser-verification' in response.text or 'cloudflare' in response.text.lower():
+        raise RuntimeError(f"KTC returned Cloudflare challenge page — likely bot-blocked")
+
     return response.text
 
 
 def parse_page(html):
     soup = BeautifulSoup(html, 'html.parser')
 
-    # Find all div elements with the class 'player-name'
     players = soup.find_all('div', class_='player-name')
-    # Find all div elements with the class 'value'
     values = soup.find_all('div', class_='value')
+
+    if not players and not values:
+        # Check if the page structure changed
+        print("WARNING: No 'player-name' or 'value' divs found — KTC may have changed their HTML structure")
 
     player_data = []
     for player, value in zip(players, values):
-        # Find the <a> tag inside the player div and get its text
         a_tag = player.find('a')
-        if a_tag:  # Check if the <a> tag exists
-            name = a_tag.text.strip()  # Fallback if no <a> tag is present
+        if a_tag:
+            name = a_tag.text.strip()
             player_value = value.text.strip()
             player_data.append({'name': name, 'value': player_value})
 
@@ -81,30 +105,54 @@ def parse_page(html):
 
 def scrape_keep_trade_cut():
     base_url = 'https://keeptradecut.com/dynasty-rankings?filters=QB|WR|RB|TE&format=1'
-    page = 0
     all_players = []
-    for x in range(20):
-        print(f"Scraping page: {page}")
-        url = f"{base_url}&page={page}"
-        html = fetch_data(url)
-        player_data = parse_page(html)
-        if not player_data:
-            break  # Break the loop if no data is found
-        print(player_data)
-        print(page)
-        if all_players and player_data:  # Check if both arrays are non-empty
-            # sometimes KTC on initial load doesnt load properly, and renders the last player from previous page as the first, causing duplicates
-            if all_players[-1]['name'] == player_data[0]['name']:
-                print('Restarting... issue when scraping')
-                scrape_keep_trade_cut()
-                break
-        all_players.extend(player_data)
-        page += 1
-        time.sleep(.5)  # Sleep to be polite to the server
 
+    for page in range(20):
+        url = f"{base_url}&page={page}"
+        print(f"Scraping page {page}...")
+
+        # Retry logic for transient failures
+        player_data = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                html = fetch_data(url)
+                player_data = parse_page(html)
+                break
+            except RuntimeError as e:
+                print(f"  Attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
+                if attempt < MAX_RETRIES - 1:
+                    wait = 5 * (attempt + 1)
+                    print(f"  Retrying in {wait}s...")
+                    time.sleep(wait)
+                else:
+                    raise RuntimeError(f"Failed to scrape page {page} after {MAX_RETRIES} attempts: {e}")
+
+        if not player_data:
+            print(f"  No players found on page {page} — stopping pagination")
+            break
+
+        # Duplicate detection (KTC sometimes renders last player from prev page as first)
+        if all_players and player_data:
+            if all_players[-1]['name'] == player_data[0]['name']:
+                print(f"  Duplicate detected ({player_data[0]['name']}), skipping first entry")
+                player_data = player_data[1:]
+
+        print(f"  Found {len(player_data)} players")
+        all_players.extend(player_data)
+        # Randomize delay to look less bot-like
+        time.sleep(random.uniform(1.0, 3.0))
+
+    print(f"Total players scraped: {len(all_players)}")
     return all_players
 
 
-# Run the scraper and print the results
-players = scrape_keep_trade_cut()
-insert_records(players)
+if __name__ == "__main__":
+    try:
+        conn = connect_db()
+        players = scrape_keep_trade_cut()
+        insert_records(conn, players)
+        conn.close()
+        print("KTC scraper complete.")
+    except Exception as e:
+        print(f"KTC scraper FAILED: {e}", file=sys.stderr)
+        sys.exit(1)
