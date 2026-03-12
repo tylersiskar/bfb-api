@@ -3,23 +3,10 @@ import pg from "pg";
 import cron from "node-cron";
 import { spawn } from "child_process";
 import { runKeeperModel } from "./utils/pythonBridge.js";
+import { sendGroupMe } from "./utils/groupme.js";
+import { attemptSelfHeal } from "./utils/selfHeal.js";
 
 const { Pool } = pg;
-
-const GROUPME_BOT_ID = "e92a725c167cdf60e08d1b5a1c";
-
-async function sendGroupMe(text) {
-  try {
-    const res = await fetch("https://api.groupme.com/v3/bots/post", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bot_id: GROUPME_BOT_ID, text }),
-    });
-    if (!res.ok) console.error("GroupMe post failed:", res.status);
-  } catch (err) {
-    console.error("GroupMe post error:", err);
-  }
-}
 
 const pool = new Pool({
   user: process.env.PG_USER,
@@ -108,10 +95,16 @@ async function runKtcScraper() {
         console.log("KTC scraper complete.");
         resolve();
       } else {
-        reject(new Error(`KTC scraper exited with code ${code}: ${stderr.slice(-200)}`));
+        reject(
+          new Error(
+            `KTC scraper exited with code ${code}: ${stderr.slice(-200)}`,
+          ),
+        );
       }
     });
-    proc.on("error", (err) => reject(new Error(`KTC scraper failed to start: ${err.message}`)));
+    proc.on("error", (err) =>
+      reject(new Error(`KTC scraper failed to start: ${err.message}`)),
+    );
   });
 }
 
@@ -274,38 +267,43 @@ function startCronJobs() {
   //   }
   // });
 
-  // Daily 6am — update player stats, NFL players, and KTC values
-  cron.schedule("0 6 * * *", async () => {
+  // Daily 9am EST (2pm UTC) — update player stats, NFL players, and KTC values
+  cron.schedule("0 1 * * *", async () => {
     console.log("[cron] Running daily player update...");
     const failures = [];
     try {
       await updatePlayerStats();
     } catch (err) {
       console.error("[cron] updatePlayerStats failed:", err);
-      failures.push(`Stats: ${err.message}`);
+      failures.push({ step: "updatePlayerStats", error: err.message });
     }
     try {
       await updateNflPlayers();
     } catch (err) {
       console.error("[cron] updateNflPlayers failed:", err);
-      failures.push(`NFL Players: ${err.message}`);
+      failures.push({ step: "updateNflPlayers", error: err.message });
     }
     try {
       await runKtcScraper();
     } catch (err) {
       console.error("[cron] KTC scraper failed:", err);
-      failures.push(`KTC: ${err.message}`);
+      failures.push({ step: "runKtcScraper", error: err.message });
     }
     try {
       await runKeeperModel();
     } catch (err) {
       console.warn("[cron] Keeper model failed:", err.message);
-      failures.push(`Keeper Model: ${err.message}`);
+      failures.push({ step: "runKeeperModel", error: err.message });
     }
     if (failures.length === 0) {
-      await sendGroupMe("Daily player update complete (stats, players, KTC, keeper values).");
+      await sendGroupMe(
+        "Daily player update complete (stats, players, KTC, keeper values).",
+      );
     } else {
-      await sendGroupMe(`Daily update partial failure:\n${failures.join("\n")}`);
+      await sendGroupMe(
+        `Daily update failed:\n${failures.map((f) => `${f.step}: ${f.error}`).join("\n")}`,
+      );
+      await attemptSelfHeal(failures);
     }
   });
 
