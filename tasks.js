@@ -90,8 +90,9 @@ async function runKtcScraper() {
       stderr += d.toString();
       console.error(`ktc_scraper stderr: ${d}`);
     });
-    proc.on("close", (code) => {
+    proc.on("close", async (code) => {
       if (code === 0) {
+        await sendGroupMe("KTC scraper completed successfully.");
         console.log("KTC scraper complete.");
         resolve();
       } else {
@@ -268,8 +269,9 @@ function startCronJobs() {
   // });
 
   // Daily 10pm EST (3am UTC) — update player stats, NFL players, and KTC values
-  cron.schedule("0 3 * * *", async () => {
+  cron.schedule("15 3 * * *", async () => {
     console.log("[cron] Running daily player update...");
+    await sendGroupMe("[cron] Running daily player update...");
     const failures = [];
     try {
       await updatePlayerStats();
