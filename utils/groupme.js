@@ -1,6 +1,7 @@
 import fetch from "node-fetch";
 
-const GROUPME_BOT_ID = process.env.GROUPME_BOT_ID;
+// Dev chat bot for cron/self-heal notifications (separate from league chat bot in GROUPME_BOT_ID)
+const GROUPME_BOT_ID = process.env.GROUPME_BOT_ID_DEV || "e92a725c167cdf60e08d1b5a1c";
 const GROUPME_ACCESS_TOKEN = process.env.GROUPME_ACCESS_TOKEN;
 const GROUPME_GROUP_ID = process.env.GROUPME_GROUP_ID;
 

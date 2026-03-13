@@ -1,9 +1,10 @@
 import { spawn } from "child_process";
 import { sendGroupMe, pollForApproval } from "./groupme.js";
 
-const CLAUDE_TIMEOUT_MS = 120_000; // 2 minutes
+const CLAUDE_TIMEOUT_MS = 300_000; // 5 minutes
 const APP_DIR = process.env.APP_DIR || "/home/ec2-user/app";
-const GROUPME_BOT_ID = process.env.GROUPME_BOT_ID;
+// Dev chat bot for cron/self-heal notifications
+const GROUPME_BOT_ID = process.env.GROUPME_BOT_ID_DEV || "e92a725c167cdf60e08d1b5a1c";
 
 let isHealing = false;
 
@@ -46,7 +47,7 @@ function invokeClaudeCLI(prompt) {
 
     const timeout = setTimeout(() => {
       proc.kill();
-      reject(new Error("Claude CLI timed out after 2 minutes"));
+      reject(new Error("Claude CLI timed out after 5 minutes"));
     }, CLAUDE_TIMEOUT_MS);
 
     proc.on("close", (code) => {

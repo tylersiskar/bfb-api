@@ -84,7 +84,7 @@ async function updateNflPlayers() {
 
 async function runKtcScraper() {
   return new Promise((resolve, reject) => {
-    const proc = spawn("python3", ["scripts/ktc_scraper.py"]);
+    const proc = spawn("python3.11", ["scripts/ktc_scraper.py"]);
     let stderr = "";
     proc.stderr.on("data", (d) => {
       stderr += d.toString();
@@ -267,8 +267,8 @@ function startCronJobs() {
   //   }
   // });
 
-  // Daily 9am EST (2pm UTC) — update player stats, NFL players, and KTC values
-  cron.schedule("0 1 * * *", async () => {
+  // Daily 10pm EST (3am UTC) — update player stats, NFL players, and KTC values
+  cron.schedule("0 3 * * *", async () => {
     console.log("[cron] Running daily player update...");
     const failures = [];
     try {
