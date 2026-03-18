@@ -337,7 +337,6 @@ function startCronJobs() {
   // Daily 10:45pm EDT (2:45am UTC) — update player stats, NFL players, and KTC values
   cron.schedule("45 2 * * 3", async () => {
     console.log("[cron] Running daily player update...");
-    await sendGroupMe("[cron] Running daily player update...");
     const failures = [];
     try {
       await updatePlayerStats();
@@ -363,11 +362,7 @@ function startCronJobs() {
       console.warn("[cron] Keeper model failed:", err.message);
       failures.push({ step: "runKeeperModel", error: err.message });
     }
-    if (failures.length === 0) {
-      await sendGroupMe(
-        "Daily player update complete (stats, players, KTC, keeper values).",
-      );
-    } else {
+    if (failures.length > 0) {
       await sendGroupMe(
         `Daily update failed:\n${failures.map((f) => `${f.step}: ${f.error}`).join("\n")}`,
       );
