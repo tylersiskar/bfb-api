@@ -2,9 +2,13 @@ import fetch from "node-fetch";
 import pg from "pg";
 import cron from "node-cron";
 import { spawn } from "child_process";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 import { runKeeperModel } from "./utils/pythonBridge.js";
-import { sendGroupMe } from "./utils/groupme.js";
+import { sendGroupMe, pollForResponse } from "./utils/groupme.js";
 import { attemptSelfHeal } from "./utils/selfHeal.js";
+import { generateTradeReport } from "./utils/tradeReport.js";
 
 const { Pool } = pg;
 
@@ -92,7 +96,6 @@ async function runKtcScraper() {
     });
     proc.on("close", async (code) => {
       if (code === 0) {
-        await sendGroupMe("KTC scraper completed successfully.");
         console.log("KTC scraper complete.");
         resolve();
       } else {
@@ -107,6 +110,69 @@ async function runKtcScraper() {
       reject(new Error(`KTC scraper failed to start: ${err.message}`)),
     );
   });
+}
+
+async function runTradeReport() {
+  return new Promise((resolve, reject) => {
+    const proc = spawn("python3", ["scripts/generate_trade_report.py"], {
+      env: { ...process.env },
+    });
+    let stderr = "";
+    proc.stderr.on("data", (d) => {
+      stderr += d.toString();
+      console.error(`trade_report stderr: ${d}`);
+    });
+    proc.on("close", (code) => {
+      if (code === 0) {
+        console.log("Trade report generated.");
+        resolve();
+      } else {
+        reject(
+          new Error(
+            `Trade report exited with code ${code}: ${stderr.slice(-200)}`,
+          ),
+        );
+      }
+    });
+    proc.on("error", (err) =>
+      reject(new Error(`Trade report failed to start: ${err.message}`)),
+    );
+  });
+}
+
+function parseTradeReportSummary() {
+  const reportPath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "output",
+    "trade_report.txt",
+  );
+  const report = fs.readFileSync(reportPath, "utf-8");
+  const lines = report.split("\n");
+
+  let summary = "";
+  let inSection = false;
+
+  for (const line of lines) {
+    if (line.startsWith("SURPLUS (")) {
+      inSection = true;
+      summary += "📊 WEEKLY TRADE REPORT\n\n";
+      summary += line + "\n";
+    } else if (line.startsWith("SUGGESTED TRADE FITS:")) {
+      inSection = true;
+      summary += "\n" + line + "\n";
+    } else if (line.startsWith("NEEDS (")) {
+      inSection = false;
+    } else if (
+      (inSection && line.startsWith("DIMINISHING VALUE")) ||
+      (inSection && line.startsWith("==="))
+    ) {
+      inSection = false;
+    } else if (inSection && line.trim() && !line.startsWith("---")) {
+      summary += line + "\n";
+    }
+  }
+
+  return summary.trim() || "No surplus players or trade fits this week.";
 }
 
 async function syncLeague(leagueId) {
@@ -268,8 +334,8 @@ function startCronJobs() {
   //   }
   // });
 
-  // Daily 10pm EST (3am UTC) — update player stats, NFL players, and KTC values
-  cron.schedule("15 3 * * *", async () => {
+  // Daily 10:45pm EDT (2:45am UTC) — update player stats, NFL players, and KTC values
+  cron.schedule("45 2 * * 3", async () => {
     console.log("[cron] Running daily player update...");
     await sendGroupMe("[cron] Running daily player update...");
     const failures = [];
@@ -306,6 +372,20 @@ function startCronJobs() {
         `Daily update failed:\n${failures.map((f) => `${f.step}: ${f.error}`).join("\n")}`,
       );
       await attemptSelfHeal(failures);
+    }
+  });
+
+  // Tuesday 10pm EDT (Wednesday 2:00am UTC) — trade report summary to dev GroupMe
+  cron.schedule("0 2 * * 3", async () => {
+    console.log("[cron] Generating trade report...");
+    try {
+      await runTradeReport();
+      const summary = parseTradeReportSummary();
+      await sendGroupMe(summary);
+      console.log("[cron] Trade report summary sent.");
+    } catch (err) {
+      console.error("[cron] Trade report failed:", err);
+      await sendGroupMe(`Trade report FAILED: ${err.message}`);
     }
   });
 

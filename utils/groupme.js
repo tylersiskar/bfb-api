@@ -8,12 +8,12 @@ const GROUPME_GROUP_ID = process.env.GROUPME_GROUP_ID;
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const POLL_INTERVAL_MS = 15 * 1000; // 15 seconds
 
-export async function sendGroupMe(text) {
+export async function sendGroupMe(text, botId = GROUPME_BOT_ID) {
   try {
     const res = await fetch("https://api.groupme.com/v3/bots/post", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ bot_id: GROUPME_BOT_ID, text }),
+      body: JSON.stringify({ bot_id: botId, text }),
     });
     if (!res.ok) console.error("GroupMe post failed:", res.status);
   } catch (err) {
@@ -48,14 +48,18 @@ export async function fetchRecentMessages(sinceTimestamp) {
 }
 
 export async function pollForApproval(sinceTimestamp) {
-  const deadline = Date.now() + APPROVAL_TIMEOUT_MS;
+  return pollForResponse(sinceTimestamp, /^approve$/i);
+}
+
+export async function pollForResponse(sinceTimestamp, pattern, timeoutMs = APPROVAL_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
     const messages = await fetchRecentMessages(sinceTimestamp);
-    const approval = messages.find((m) => /^approve$/i.test(m.text?.trim()));
+    const match = messages.find((m) => pattern.test(m.text?.trim()));
 
-    if (approval) {
-      return { approved: true, approver: approval.name };
+    if (match) {
+      return { approved: true, approver: match.name };
     }
 
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));

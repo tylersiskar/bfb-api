@@ -35,16 +35,16 @@ DRAFT_CAPITAL_DECAY = 0.5         # draft capital loses 50% value per year witho
 DRAFT_BLEND_GAMES = 17            # full season of games before production fully replaces draft capital
 
 # Starting lineup — drives positional scarcity calculation
-STARTERS = {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "FLEX": 1}
+STARTERS = {"QB": 1, "RB": 2, "WR": 3, "TE": 1, "FLEX": 1}
 # FLEX-eligible positions get extra demand
 FLEX_ELIGIBLE = ["RB", "WR", "TE"]
 
 # positional weights for composite score
 WEIGHTS = {
-    "current_season": 0.55,
+    "current_season": 0.60,
     "longevity":      0.25,
     "scarcity":       0.10,
-    "durability":     0.10,
+    "durability":     0.05,
 }
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -364,8 +364,8 @@ def build_draft_value_lookup():
 # RB/WR drafted high are more valuable as keepers than QBs (1-QB league)
 DRAFT_POS_MULTIPLIER = {"QB": 0.75, "RB": 1.15, "WR": 1.10, "TE": 0.80}
 
-# Cap on draft capital score — rookies shouldn't outscore proven elite producers
-DRAFT_CAPITAL_CAP = 0.60
+# Cap on draft capital score — unproven players shouldn't outscore producers
+DRAFT_CAPITAL_CAP = 0.40
 
 
 def calculate_draft_capital_score(player_row, draft_value_lookup, latest_season):
@@ -429,12 +429,13 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
     For younger players (<5 years exp): only use the most recent season.
     Returns (weighted_full_season_fp, total_games) or (None, 0) if no data.
     """
-    # Young players (3 or fewer years): only use the most recent season.
-    # Year 4: use 2 seasons with heavy recency (drops oldest bad season).
-    # Year 5+: use all 3 seasons.
-    if years_exp <= 3:
+    # years_exp is 0-indexed (0 = rookie season, 1 = 2nd year, etc.)
+    # Rookie: single season only (limited NFL track record).
+    # 2nd year (years_exp=1): 2 seasons with heavy recency.
+    # 3rd year+ (years_exp>=2): all 3 seasons.
+    if years_exp <= 0:
         n_seasons = 1
-    elif years_exp <= 4:
+    elif years_exp <= 1:
         n_seasons = 2
 
     player_seasons = df[
@@ -480,6 +481,19 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
             if outlier_season is not None:
                 player_seasons = player_seasons[player_seasons["season"] != outlier_season]
 
+    # Exclude low-game seasons — injury-shortened years shouldn't tank value.
+    # Veterans (>3 years): drop seasons with <13 games.
+    # Young players (<=3 years): only drop truly injured seasons (<6 games)
+    # to avoid penalizing guys like Nabers (4 games) while keeping
+    # half-season performances (8+ games) that represent real production.
+    if len(player_seasons) > 1:
+        game_threshold = 13 if years_exp > 3 else 6
+        full_seasons = player_seasons[
+            pd.to_numeric(player_seasons["games"], errors="coerce") >= game_threshold
+        ]
+        if len(full_seasons) >= 1:
+            player_seasons = full_seasons
+
     # Recency-weighted season weights by experience tier
     if years_exp >= 7:
         # Established vets: favor recency but still smooth
@@ -490,8 +504,14 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
             season_weights = {latest_season: 3.0, latest_season - 1: 2.0, latest_season - 2: 1.0}
         else:
             season_weights = {latest_season: 4.0, latest_season - 1: 1.5, latest_season - 2: 1.0}
+    elif years_exp >= 3:
+        # 4th-5th year: 3 seasons, heavy recency (breakout years dominate)
+        season_weights = {latest_season: 4.0, latest_season - 1: 1.0, latest_season - 2: 0.5}
+    elif years_exp >= 2:
+        # 3rd year: 3 seasons, very heavy recency (rookie year barely counts)
+        season_weights = {latest_season: 4.0, latest_season - 1: 1.5, latest_season - 2: 0.25}
     else:
-        # years_exp == 4: only 2 seasons used (n_seasons=2)
+        # years_exp == 1: only 2 seasons used (n_seasons=2)
         season_weights = {latest_season: 3.0, latest_season - 1: 1.0}
     weighted_ppg_sum = 0.0
     weight_sum = 0.0
@@ -633,10 +653,11 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
 
         repl = replacement_fp.get(pos, 0)
         vor = max(full_season_fp - repl, 0)
-        # Rookies near replacement get partial VOR credit (soft landing instead
-        # of hard zero) — a rookie producing at 80%+ of replacement likely improves
-        if vor == 0 and years_exp <= 1 and repl > 0 and full_season_fp >= repl * 0.75:
-            vor = (full_season_fp - repl * 0.75) * 0.5
+        # Soft landing: players near replacement get partial credit instead of
+        # hard zero. A player at 90% of replacement is still roster-worthy and
+        # should score higher than a zero-production draft capital player.
+        if vor == 0 and repl > 0 and full_season_fp >= repl * 0.70:
+            vor = (full_season_fp - repl * 0.70) * 0.35
         current_value = vor / max_vor_global
 
         prod_curve = get_expected_production_curve(curves, pos, age)
@@ -685,12 +706,25 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         adjusted_draft_weight = draft_weight * max(games_played_fade, min_fade)
         composite = (1 - adjusted_draft_weight) * production_score + adjusted_draft_weight * draft_score
 
-        # Elite tier bonus: top-5 at position get a bump, scaled by demand
+        # Elite tier bonus: top-3 at position get a flat bump (compresses them
+        # together), then #4-5 get a smaller bonus. Scaled by roster demand.
         pos_rank = pos_vor_ranked.get(name, 99)
         if pos_rank <= 5:
             demand_factor = pos_demand.get(pos, 1) / max_demand
-            elite_bonus = 0.12 * demand_factor * (6 - pos_rank) / 5
+            if pos_rank <= 3:
+                elite_bonus = 0.14 * demand_factor
+            else:
+                elite_bonus = 0.14 * demand_factor * (6 - pos_rank) / 4
             composite += elite_bonus
+
+        # Prime window discount: keeper value should reflect how many elite
+        # years a player has left. A player with 2 remaining elite years is
+        # worth less as a keeper than one with 4, even if current production
+        # is higher. Scale: 4 years = 1.0, 2 years = 0.85, 1 year = 0.75.
+        elite_years = sum(1 for m in prod_curve if m > 0.7)
+        if elite_years < PROJECTION_YEARS:
+            prime_discount = 0.70 + 0.30 * (elite_years / PROJECTION_YEARS)
+            composite *= prime_discount
 
         results.append({
             "player_name": name,

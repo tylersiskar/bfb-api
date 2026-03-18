@@ -94,11 +94,19 @@ export function enrichWithKeeperValues(players) {
     }
   }
 
+  // Find actual max keeper_value for proper normalization
+  let maxKeeperValue = 0;
+  for (const [, entry] of map) {
+    if (entry.keeper_value > maxKeeperValue) maxKeeperValue = entry.keeper_value;
+  }
+  if (maxKeeperValue === 0) maxKeeperValue = 1;
+
   return players.map((player) => {
     const name = player.full_name || player.player_name;
     if (!name) return player;
 
-    const kv = map.get(name.toLowerCase());
+    // Use partial match to handle name suffixes (e.g., "Ollie Gordon" → "Ollie Gordon II")
+    const kv = lookupKeeperValue(name);
     if (!kv) return player;
 
     const subScores = {
@@ -110,25 +118,35 @@ export function enrichWithKeeperValues(players) {
       projected_years_elite: kv.projected_years_elite,
     };
 
-    // Incoming rookies with 0 NFL games: keep KTC dynasty value
+    // Incoming rookies with 0 NFL games: discount KTC dynasty value
+    // Keeps them visible for trade value but prevents 0-production players
+    // from ranking above proven producers
     if (kv.years_exp === 0 && kv.games_played === 0) {
-      return { ...player, ...subScores };
+      const ktcValue = player.value ? Number(player.value) : 0;
+      const discountedValue = Math.round(ktcValue * 0.3);
+      return { ...player, bfbValue: discountedValue, ...subScores };
     }
 
-    // 1st-year players: 50/50 blend of KTC and model value
+    // 1st-year players: 20/80 blend of KTC and model value
+    // Production-based keeper model dominates, KTC provides minor dynasty upside
+    // Low producers (<100 fantasy pts) get additional discount — draft hype shouldn't
+    // outrank proven veterans
     if (kv.years_exp <= 1) {
       const ktcValue = player.value ? Number(player.value) : 0;
       const modelValue = NORMALIZE_TO_KTC && maxKtc > 0
-        ? Math.round((kv.keeper_value / 1.0) * maxKtc)
+        ? Math.round((kv.keeper_value / maxKeeperValue) * maxKtc)
         : Math.round(kv.keeper_value * 10000);
-      const blendedValue = Math.round(0.5 * ktcValue + 0.5 * modelValue);
+      let blendedValue = Math.round(0.2 * ktcValue + 0.8 * modelValue);
+      if (kv.keeper_fantasy_points < 100) {
+        blendedValue = Math.round(blendedValue * 0.7);
+      }
       return { ...player, bfbValue: blendedValue, ...subScores };
     }
 
     const rawValue = kv.keeper_value * 10000;
-    // Scale keeper values into KTC range so both systems are comparable
+    // Scale keeper values into KTC range using actual max for full spread
     const bfbValue = NORMALIZE_TO_KTC && maxKtc > 0
-      ? Math.round((kv.keeper_value / 1.0) * maxKtc)
+      ? Math.round((kv.keeper_value / maxKeeperValue) * maxKtc)
       : Math.round(rawValue);
 
     return {
