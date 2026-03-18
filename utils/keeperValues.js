@@ -97,7 +97,8 @@ export function enrichWithKeeperValues(players) {
   // Find actual max keeper_value for proper normalization
   let maxKeeperValue = 0;
   for (const [, entry] of map) {
-    if (entry.keeper_value > maxKeeperValue) maxKeeperValue = entry.keeper_value;
+    if (entry.keeper_value > maxKeeperValue)
+      maxKeeperValue = entry.keeper_value;
   }
   if (maxKeeperValue === 0) maxKeeperValue = 1;
 
@@ -107,7 +108,23 @@ export function enrichWithKeeperValues(players) {
 
     // Use partial match to handle name suffixes (e.g., "Ollie Gordon" → "Ollie Gordon II")
     const kv = lookupKeeperValue(name);
-    if (!kv) return player;
+    if (!kv) {
+      // Player has no keeper model data — likely an incoming prospect.
+      // Discount KTC dynasty value by position to prevent unproven prospects
+      // from outranking proven NFL players.
+      const ktcValue = player.value ? Number(player.value) : 0;
+      if (ktcValue > 0) {
+        const PROSPECT_DISCOUNTS = {
+          QB: 0.5,
+          RB: 0.9,
+          WR: 0.75,
+          TE: 0.9,
+        };
+        const discount = PROSPECT_DISCOUNTS[player.position] ?? 0.9;
+        return { ...player, bfbValue: Math.round(ktcValue * discount) };
+      }
+      return player;
+    }
 
     const subScores = {
       keeper_value: kv.keeper_value,
@@ -133,9 +150,10 @@ export function enrichWithKeeperValues(players) {
     // outrank proven veterans
     if (kv.years_exp <= 1) {
       const ktcValue = player.value ? Number(player.value) : 0;
-      const modelValue = NORMALIZE_TO_KTC && maxKtc > 0
-        ? Math.round((kv.keeper_value / maxKeeperValue) * maxKtc)
-        : Math.round(kv.keeper_value * 10000);
+      const modelValue =
+        NORMALIZE_TO_KTC && maxKtc > 0
+          ? Math.round((kv.keeper_value / maxKeeperValue) * maxKtc)
+          : Math.round(kv.keeper_value * 10000);
       let blendedValue = Math.round(0.2 * ktcValue + 0.8 * modelValue);
       if (kv.keeper_fantasy_points < 100) {
         blendedValue = Math.round(blendedValue * 0.7);
@@ -145,9 +163,10 @@ export function enrichWithKeeperValues(players) {
 
     const rawValue = kv.keeper_value * 10000;
     // Scale keeper values into KTC range using actual max for full spread
-    const bfbValue = NORMALIZE_TO_KTC && maxKtc > 0
-      ? Math.round((kv.keeper_value / maxKeeperValue) * maxKtc)
-      : Math.round(rawValue);
+    const bfbValue =
+      NORMALIZE_TO_KTC && maxKtc > 0
+        ? Math.round((kv.keeper_value / maxKeeperValue) * maxKtc)
+        : Math.round(rawValue);
 
     return {
       ...player,
