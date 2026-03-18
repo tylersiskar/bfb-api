@@ -14,7 +14,7 @@ import {
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
-const port = 5001;
+const port = 5000;
 
 app.use("/api", routes);
 
