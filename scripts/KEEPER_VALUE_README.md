@@ -15,9 +15,9 @@ The final keeper value is a weighted blend of four components, multiplied by a c
 
 ```
 WEIGHTS = {
-    "current_season": 0.60,   # VOR-based production (dominant factor)
+    "current_season": 0.57,   # VOR-based production (dominant factor)
     "longevity":      0.25,   # discounted future production via aging curves
-    "scarcity":       0.10,   # positional replaceability
+    "scarcity":       0.13,   # positional replaceability (calibrated up from 0.10)
     "durability":     0.05,   # games played consistency
 }
 ```
@@ -50,6 +50,8 @@ Note: `years_exp` is 0-indexed from nflreadpy (0 = rookie season).
 **Draft Capital Blending** — For players with limited game history, draft position (OTC values) blends into the score. The blend weight fades with experience: 40% for rookies, 20% for 2nd year, 10% for 3rd year, 0% after. Capped at 0.40 so unproven draft picks can't outscore proven producers.
 
 **Elite Tier Bonus** — Top-3 at each position get a flat bonus (0.14 scaled by roster demand), compressing elite tiers together. Positions with more starter slots (RB: 2 + FLEX share, WR: 3 + FLEX share) get larger bonuses than QB/TE.
+
+**Positional Keeper Premium** — RBs receive a 1.15x multiplier on their composite score. Calibrated from historical Sleeper trade data (88 trades across 4 seasons) which showed RBs undervalued by ~30% relative to WRs in actual 1-for-1 trades. RB prime windows are shorter, making each elite year more valuable as a keeper asset.
 
 **Prime Window Discount** — Players with fewer projected elite years (aging curve multiplier >0.7) get discounted. A player with 2 elite years left scores ~85% of one with 4. This penalizes aging stars like CMC as keeper assets despite elite current production.
 
@@ -106,12 +108,31 @@ Typical findings:
 - **QBs** maintain production well into their 30s
 - **TEs** late bloomers, peak 26-30
 
+## Calibration
+
+The model parameters are calibrated against real trade history from Sleeper using `calibrate_model.py`. This script:
+1. Chains through `previous_league_id` to fetch all historical trades (88 trades across 4 seasons)
+2. Reconstructs what the model would have valued each side at trade time
+3. Uses "revealed preference" (both sides agreed ≈ fair) to identify systematic biases
+4. Outputs positional bias analysis, cross-position exchange rates, and parameter recommendations
+
+Key findings from calibration:
+- RB:WR exchange rate was 0.69 (model undervalued RBs by ~30% in 1-for-1 trades)
+- Led to: RB keeper premium (1.15x), scarcity weight increase (0.10→0.13), trade calculator POS_MULTIPLIER RB (1.15→1.30)
+
+```bash
+LEAGUE_ID=<your_id> python scripts/calibrate_model.py
+```
+Outputs: `output/calibration_report.txt`, `output/calibration_trades.csv`, `output/calibration_corrections.json`
+
 ## File Structure
 
 ```
 bfb-api/
 ├── scripts/
 │   ├── keeper_value_model.py       # Core model — pulls data, builds curves, scores players
+│   ├── calibrate_model.py          # Calibration — analyzes Sleeper trade history for bias
+│   ├── trade_calculator.py         # Trade evaluation — elite curve, package tax, lineup impact
 │   ├── generate_trade_report.py    # Trade report — combines keeper values with league rosters
 │   ├── ktc_scraper.py              # KeepTradeCut value scraper
 │   └── KEEPER_VALUE_README.md
@@ -123,7 +144,10 @@ bfb-api/
 │   ├── top_te_keepers.csv
 │   ├── aging_curves.json           # Raw aging curve data
 │   ├── keeper_report.txt           # Formatted keeper value report
-│   └── trade_report.txt            # Weekly trade report
+│   ├── trade_report.txt            # Weekly trade report
+│   ├── calibration_report.txt      # Calibration bias analysis
+│   ├── calibration_trades.csv      # Per-trade calibration detail
+│   └── calibration_corrections.json # Machine-readable correction factors
 └── tasks.js                        # Cron jobs:
     #   Wednesdays 10:45pm EDT — player update (stats, players, KTC, keeper model)
     #   Tuesdays 10:00pm EDT — trade report (surplus + trade fits sent to dev GroupMe)

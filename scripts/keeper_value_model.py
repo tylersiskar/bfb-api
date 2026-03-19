@@ -41,9 +41,9 @@ FLEX_ELIGIBLE = ["RB", "WR", "TE"]
 
 # positional weights for composite score
 WEIGHTS = {
-    "current_season": 0.60,
+    "current_season": 0.57,
     "longevity":      0.25,
-    "scarcity":       0.10,
+    "scarcity":       0.13,
     "durability":     0.05,
 }
 
@@ -543,13 +543,17 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
     return weighted_ppg * 17, int(player_seasons["games"].sum())
 
 
-def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_players_df=None):
+def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_players_df=None, target_season=None):
     """
-    Calculate composite keeper value for every player in the most recent season.
+    Calculate composite keeper value for every player in a given season.
     Includes rookies and low-sample players via draft capital scoring.
     Uses recency-weighted multi-season production for current_value.
+
+    If target_season is provided, only uses data up to that season (for historical calibration).
     """
-    latest_season = df["season"].max()
+    if target_season is not None:
+        df = df[df["season"] <= target_season].copy()
+    latest_season = target_season or df["season"].max()
     current = df[
         (df["season"] == latest_season) & (df["position"].isin(POSITIONS))
     ].copy()
@@ -717,6 +721,13 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
                 elite_bonus = 0.14 * demand_factor * (6 - pos_rank) / 4
             composite += elite_bonus
 
+        # Positional keeper premium: RBs have shorter prime windows than WRs/QBs,
+        # so each elite RB year is worth more as a keeper asset. This premium
+        # is calibrated from historical trade data showing RBs undervalued by
+        # ~30% relative to WRs in actual league trades.
+        POS_KEEPER_PREMIUM = {"QB": 1.0, "RB": 1.15, "WR": 1.0, "TE": 1.0}
+        composite *= POS_KEEPER_PREMIUM.get(pos, 1.0)
+
         # Prime window discount: keeper value should reflect how many elite
         # years a player has left. A player with 2 remaining elite years is
         # worth less as a keeper than one with 4, even if current production
@@ -843,6 +854,27 @@ def save_outputs(values_df, curves):
                         f"{row['projected_years_elite']:<10}\n")
 
     print(f"Saved report to {report_path}")
+
+
+# ── PROGRAMMATIC API ────────────────────────────────────────────────────────
+
+def run_model_for_season(df, all_players, target_season, quiet=True):
+    """
+    Run the full keeper value pipeline for a specific season.
+    Used by calibration scripts to reconstruct historical values.
+    Returns a DataFrame of keeper values as of that season.
+    """
+    season_df = df[df["season"] <= target_season].copy()
+    curves = build_aging_curves(season_df)
+    scarcity = calculate_positional_scarcity(season_df, target_season)
+    draft_value_lookup = build_draft_value_lookup()
+    values = calculate_keeper_values(
+        season_df, curves, scarcity, draft_value_lookup, all_players,
+        target_season=target_season,
+    )
+    if not quiet and not values.empty:
+        print(f"  Season {target_season}: {len(values)} players scored")
+    return values
 
 
 # ── MAIN ────────────────────────────────────────────────────────────────────

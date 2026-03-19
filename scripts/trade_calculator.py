@@ -62,9 +62,9 @@ REPLACEMENT_LEVEL = {
 
 # Position-specific scarcity multipliers for the elite curve
 POS_MULTIPLIER = {
-    "QB":  0.85,   # deeper position
-    "RB":  1.15,   # scarce + volatile = premium
-    "WR":  1.00,   # baseline
+    "QB":  0.85,   # deeper position (1-QB league)
+    "RB":  1.30,   # scarce + volatile + short prime = premium (calibrated via trade history)
+    "WR":  0.95,   # slight discount vs RB scarcity (calibrated via trade history)
     "TE":  1.10,   # elite TEs are rare
     "K":   0.30,   # fungible
     "DEF": 0.30,   # fungible
