@@ -51,7 +51,9 @@ export const calculateTrade = async (req, res) => {
 
     const sidePickValue = (picks) =>
       (picks ?? []).reduce((sum, pick) => {
-        const slot = rosterToSlot[pick.current_roster_id] ?? 6;
+        // FE sends roster_id = original_roster_id — pick slot is determined
+        // by the original team's standing, not who currently holds the pick
+        const slot = rosterToSlot[pick.roster_id] ?? 6;
         return sum + getPickValue(pick.round, slot, pick.years_out ?? 0);
       }, 0);
 

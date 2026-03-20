@@ -49,16 +49,16 @@ const PICK_HIT_RATE = 0.70;
 const PICK_FUTURE_DEPRECIATION = 0.80;
 
 const PICK_BASE = {
-  1: { early: 8500, mid: 6000, late: 4000 },
-  2: { early: 2500, mid: 1500, late: 1000 },
-  3: { early: 800, mid: 600, late: 400 },
+  1: { top: 10000, early: 8000, mid: 6000, late: 4000 },
+  2: { top: 3000, early: 2400, mid: 1500, late: 1000 },
+  3: { top: 1000, early: 750, mid: 600, late: 400 },
 };
 
 export const getPickValue = (round, slot, yearsOut = 0) => {
   const roundVals = PICK_BASE[round];
   if (!roundVals) return 200;
 
-  const tier = slot <= 4 ? "early" : slot <= 8 ? "mid" : "late";
+  const tier = slot === 1 ? "top" : slot <= 4 ? "early" : slot <= 8 ? "mid" : "late";
   const base = roundVals[tier] ?? 400;
   return Math.round(base * PICK_HIT_RATE * Math.pow(PICK_FUTURE_DEPRECIATION, yearsOut));
 };
