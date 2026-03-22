@@ -1,16 +1,5 @@
-import { exec } from "../db.js";
+import { exec, getClient } from "../db.js";
 import { spawn } from "child_process";
-import pg from "pg";
-
-const { Pool } = pg;
-
-const pool = new Pool({
-  user: process.env.PG_USER,
-  host: process.env.PG_HOST,
-  database: process.env.PG_DB,
-  password: process.env.PG_PASSWORD,
-  port: 5432,
-});
 
 export const getStats = async (req, res) => {
   const { pos } = req.query;
@@ -36,7 +25,7 @@ export const updatePlayerRankings = async (req, res) => {
       `https://api.sleeper.app/v1/stats/nfl/regular/${year}`,
     );
     const stats = await statsResponse.json();
-    const client = await pool.connect();
+    const client = await getClient();
     try {
       await client.query("BEGIN");
       await client.query("DELETE FROM player_stats WHERE year = $1", [year]);

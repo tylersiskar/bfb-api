@@ -43,6 +43,7 @@ router.get("/keeper-model/status", keeperController.getStatus);
 // Trade
 router.post("/trade/calculate", tradeController.calculateTrade);
 router.post("/trade/find-deals", tradeController.findDeals);
+router.post("/trade/recommended", tradeController.getRecommendedTrades);
 router.get(
   "/league/:leagueId/trade-targets/:rosterId",
   tradeController.getTradeTargets,

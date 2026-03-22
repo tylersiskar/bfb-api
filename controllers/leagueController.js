@@ -1,34 +1,26 @@
-import { exec } from "../db.js";
+import { exec, getRostersWithOwners, getPlayersByIds, getDraftPicksByLeague } from "../db.js";
 import {
   computePlayerValues,
   getPickValue,
 } from "../utils/calculations.js";
 import { getPickSlotMap } from "../utils/pickSlots.js";
+import { getKeeperWorthyIds } from "../utils/league.js";
 
 export const getRosters = async (req, res) => {
   try {
     const { leagueId } = req.params;
     const { year = new Date().getFullYear() } = req.query;
 
-    const rosters = await exec(
-      `SELECT r.*, u.display_name, u.avatar
-       FROM rosters r
-       LEFT JOIN league_users u ON u.roster_id = r.roster_id AND u.league_id = r.league_id
-       WHERE r.league_id = $1
-       ORDER BY r.wins DESC, r.points_for DESC`,
-      [leagueId],
-    );
-
-    const picks = await exec(
-      `SELECT * FROM draft_picks WHERE league_id = $1 ORDER BY season, round, original_roster_id`,
-      [leagueId],
-    );
+    const [rosters, picks] = await Promise.all([
+      getRostersWithOwners(leagueId),
+      getDraftPicksByLeague(leagueId),
+    ]);
 
     const ranked = rosters.map((r, i) => ({ ...r, rank: i + 1 }));
     const { rosterToSlot } = await getPickSlotMap(leagueId);
 
     const picksWithValues = picks.map((pick) => {
-      const slot = rosterToSlot[pick.current_roster_id] ?? null;
+      const slot = rosterToSlot[pick.original_roster_id] ?? null;
       return {
         ...pick,
         estimated_slot: slot,
@@ -39,12 +31,7 @@ export const getRosters = async (req, res) => {
     const allPlayerIds = [
       ...new Set(ranked.flatMap((r) => r.player_ids ?? [])),
     ];
-    const players = allPlayerIds.length
-      ? await exec(
-          `SELECT * FROM vw_players WHERE id = ANY($1::text[]) AND year = $2`,
-          [allPlayerIds, year],
-        )
-      : [];
+    const players = await getPlayersByIds(allPlayerIds, year);
     const playerMap = Object.fromEntries(players.map((p) => [p.id, p]));
 
     const enriched = ranked.map((roster) => ({
@@ -68,7 +55,7 @@ export const getStandings = async (req, res) => {
       `SELECT r.roster_id, r.wins, r.losses, r.ties, r.points_for, u.display_name, u.avatar,
               RANK() OVER (ORDER BY r.wins DESC, r.points_for DESC) AS rank
        FROM rosters r
-       LEFT JOIN league_users u ON u.roster_id = r.roster_id AND u.league_id = r.league_id
+       LEFT JOIN league_users u ON u.user_id = r.owner_id AND u.league_id = r.league_id
        WHERE r.league_id = $1`,
       [req.params.leagueId],
     );
@@ -96,7 +83,7 @@ export const getDraftPicks = async (req, res) => {
     ]);
 
     const result = picks.map((pick) => {
-      const slot = rosterToSlot[pick.current_roster_id] ?? null;
+      const slot = rosterToSlot[pick.original_roster_id] ?? null;
       return {
         ...pick,
         estimated_slot: slot,
@@ -120,8 +107,7 @@ export const getKeeperScores = async (req, res) => {
       [year],
     );
     const withValues = computePlayerValues(data);
-    const sorted = [...withValues].sort((a, b) => b.bfbValue - a.bfbValue);
-    const keeperWorthy = new Set(sorted.slice(0, 96).map((p) => p.id));
+    const keeperWorthy = getKeeperWorthyIds(withValues);
     res.json(
       withValues.map((p) => ({ ...p, keeperWorthy: keeperWorthy.has(p.id) })),
     );

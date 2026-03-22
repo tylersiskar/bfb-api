@@ -531,14 +531,30 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
 
     weighted_ppg = weighted_ppg_sum / weight_sum
 
-    # Floor: weighted average can't drop below 70% of best recent season PPG
+    # Floor: weighted average can't drop below a % of best/latest season PPG.
+    # Young players (<=3 years exp) get a higher floor (90% of latest season)
+    # — if they just proved it, old down years shouldn't tank them significantly.
+    # Veterans get the standard 80% floor off their best season.
     if n_seasons > 1:
         best_ppg = max(
             (r.get("fantasy_points_half_ppr", 0) / max(pd.to_numeric(r.get("games", 1), errors="coerce"), 1))
             for _, r in player_seasons.iterrows()
             if pd.to_numeric(r.get("games", 0), errors="coerce") >= 1 and r.get("fantasy_points_half_ppr", 0) > 0
         )
-        weighted_ppg = max(weighted_ppg, best_ppg * 0.80)
+
+        if years_exp <= 3:
+            # Young players: floor at 90% of latest season PPG — trust recent proof
+            latest_row = player_seasons[player_seasons["season"] == latest_season]
+            latest_ppg = 0
+            if not latest_row.empty:
+                lr = latest_row.iloc[0]
+                lr_fp = lr.get("fantasy_points_half_ppr", 0)
+                lr_gp = pd.to_numeric(lr.get("games", 0), errors="coerce")
+                if not pd.isna(lr_gp) and lr_gp >= 1 and lr_fp > 0:
+                    latest_ppg = lr_fp / lr_gp
+            weighted_ppg = max(weighted_ppg, latest_ppg * 0.90, best_ppg * 0.80)
+        else:
+            weighted_ppg = max(weighted_ppg, best_ppg * 0.80)
 
     return weighted_ppg * 17, int(player_seasons["games"].sum())
 
@@ -665,6 +681,7 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         current_value = vor / max_vor_global
 
         prod_curve = get_expected_production_curve(curves, pos, age)
+        elite_years = sum(1 for m in prod_curve if m > 0.7)
         if vor > 0:
             future_value = 0
             for y, mult in enumerate(prod_curve):
@@ -673,6 +690,14 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
                 future_value += future_vor * ((1 - DISCOUNT_RATE) ** y)
             max_longevity = max_vor_global * PROJECTION_YEARS
             longevity_score = min(future_value / max(max_longevity, 1), 1.0)
+
+            # Floor: players near replacement but with prime years ahead
+            # shouldn't get zero longevity. Their aging curve alone has value —
+            # a 24yo RB with 4 elite years is worth more than a 30yo even if
+            # current VOR is marginal.
+            if longevity_score < 0.01 and elite_years >= 2:
+                prime_floor = (elite_years / PROJECTION_YEARS) * 0.15
+                longevity_score = max(longevity_score, prime_floor)
         else:
             longevity_score = 0.0
 

@@ -2,7 +2,7 @@
 // Non-linear scaling so stars are worth exponentially more than role players.
 // This is the core mechanism preventing "4 mediocre guys = 1 star" trades.
 
-const ELITE_EXPONENT = 1.5;
+const ELITE_EXPONENT = 1.65;
 
 // ── Package Tax ──────────────────────────────────────────────────────────
 // Penalty applied to the side sending more assets in a trade.
@@ -46,6 +46,7 @@ export const computePlayerValues = (players) => {
 // Hit-rate discount: picks bust more often than owners expect.
 
 const PICK_HIT_RATE = 0.70;
+const PICK_TOP_HIT_RATE = 0.80;
 const PICK_FUTURE_DEPRECIATION = 0.80;
 
 const PICK_BASE = {
@@ -60,7 +61,8 @@ export const getPickValue = (round, slot, yearsOut = 0) => {
 
   const tier = slot === 1 ? "top" : slot <= 4 ? "early" : slot <= 8 ? "mid" : "late";
   const base = roundVals[tier] ?? 400;
-  return Math.round(base * PICK_HIT_RATE * Math.pow(PICK_FUTURE_DEPRECIATION, yearsOut));
+  const hitRate = tier === "top" ? PICK_TOP_HIT_RATE : PICK_HIT_RATE;
+  return Math.round(base * hitRate * Math.pow(PICK_FUTURE_DEPRECIATION, yearsOut));
 };
 
 // ── Trade Value Aggregation ─────────────────────────────────────────────
@@ -73,12 +75,13 @@ export const getPickValue = (round, slot, yearsOut = 0) => {
  * @param {number} otherSideAssetCount - number of assets on the OTHER side
  * @returns {{ total, rawTotal, taxRate, taxApplied }}
  */
-export const calculateTradeValue = (values, pickValue = 0, otherSideAssetCount = 0) => {
-  const maxVal = Math.max(...values, 1);
+export const calculateTradeValue = (values, pickValue = 0, otherSideAssetCount = 0, globalMax = null) => {
+  const maxVal = globalMax ?? Math.max(...values, pickValue, 1);
 
   const curvedValues = values.map((v) => applyEliteCurve(v, maxVal));
   const rawPlayerTotal = curvedValues.reduce((sum, v) => sum + v, 0);
-  const rawTotal = rawPlayerTotal + pickValue;
+  const curvedPickValue = pickValue > 0 ? applyEliteCurve(pickValue, maxVal) : 0;
+  const rawTotal = rawPlayerTotal + curvedPickValue;
 
   const myAssets = values.length + (pickValue > 0 ? 1 : 0);
   const assetDiff = myAssets - otherSideAssetCount;
@@ -88,9 +91,3 @@ export const calculateTradeValue = (values, pickValue = 0, otherSideAssetCount =
 
   return { total, rawTotal: Math.round(rawTotal), taxRate, taxApplied };
 };
-
-// Legacy exports (kept for backward compatibility)
-export const DIMINISHING = [1.0, 0.75, 0.55, 0.40, 0.30];
-
-export const diminishingTotal = (values) =>
-  values.reduce((sum, v, i) => sum + v * (DIMINISHING[i] ?? 0.30), 0);

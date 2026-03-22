@@ -1,24 +1,14 @@
 import fetch from "node-fetch";
-import pg from "pg";
 import cron from "node-cron";
 import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { getClient } from "./db.js";
 import { runKeeperModel } from "./utils/pythonBridge.js";
-import { sendGroupMe, pollForResponse } from "./utils/groupme.js";
+import { sendGroupMe } from "./utils/groupme.js";
 import { attemptSelfHeal } from "./utils/selfHeal.js";
-import { generateTradeReport } from "./utils/tradeReport.js";
-
-const { Pool } = pg;
-
-const pool = new Pool({
-  user: process.env.PG_USER,
-  host: process.env.PG_HOST,
-  database: process.env.PG_DB,
-  password: process.env.PG_PASSWORD,
-  port: 5432,
-});
+import { computeDraftOrderFromBracket } from "./utils/pickSlots.js";
 
 async function updatePlayerStats(year = new Date().getFullYear()) {
   console.log("Start Update Player Stats.");
@@ -26,7 +16,7 @@ async function updatePlayerStats(year = new Date().getFullYear()) {
     `https://api.sleeper.app/v1/stats/nfl/regular/${year}`,
   );
   const stats = await statsResponse.json();
-  const client = await pool.connect();
+  const client = await getClient();
   try {
     await client.query("BEGIN");
     await client.query("DELETE FROM player_stats WHERE year = $1", [year]);
@@ -57,7 +47,7 @@ async function updateNflPlayers() {
   console.log("Start Update NFL Players.");
   const response = await fetch("https://api.sleeper.app/v1/players/nfl");
   const players = await response.json();
-  const client = await pool.connect();
+  const client = await getClient();
   try {
     await client.query("BEGIN");
     await client.query("DELETE FROM nfl_players");
@@ -177,7 +167,7 @@ function parseTradeReportSummary() {
 
 async function syncLeague(leagueId) {
   console.log(`Syncing league ${leagueId}...`);
-  const client = await pool.connect();
+  const client = await getClient();
   try {
     // 1. League info
     const leagueRes = await fetch(
@@ -216,7 +206,7 @@ async function syncLeague(leagueId) {
       );
     }
 
-    // 3. Draft order (offseason: real slot assignments; in-season: null)
+    // 3. Draft order (offseason: real slot assignments; fallback: compute from previous season bracket)
     const draftsRes = await fetch(
       `https://api.sleeper.app/v1/league/${leagueId}/drafts`,
     );
@@ -227,7 +217,27 @@ async function syncLeague(leagueId) {
         (d) =>
           d.slot_to_roster_id && Object.keys(d.slot_to_roster_id).length > 0,
       );
-    const draftOrder = upcomingDraft?.slot_to_roster_id ?? null;
+    let draftOrder = upcomingDraft?.slot_to_roster_id ?? null;
+
+    // If no draft order from Sleeper, compute from previous season's playoff bracket + standings
+    if (!draftOrder && league.previous_league_id && league.previous_league_id !== "0") {
+      try {
+        const [bracketRes, prevRostersRes] = await Promise.all([
+          fetch(`https://api.sleeper.app/v1/league/${league.previous_league_id}/winners_bracket`),
+          fetch(`https://api.sleeper.app/v1/league/${league.previous_league_id}/rosters`),
+        ]);
+        const bracket = await bracketRes.json();
+        const prevRosters = await prevRostersRes.json();
+
+        if (Array.isArray(bracket) && bracket.length > 0 && Array.isArray(prevRosters) && prevRosters.length > 0) {
+          draftOrder = computeDraftOrderFromBracket(bracket, prevRosters);
+          console.log(`[sync] Computed draft order from previous season bracket`);
+        }
+      } catch (err) {
+        console.warn(`[sync] Failed to compute draft order from bracket:`, err.message);
+      }
+    }
+
     await client.query(`UPDATE leagues SET draft_order = $1 WHERE id = $2`, [
       draftOrder ? JSON.stringify(draftOrder) : null,
       leagueId,

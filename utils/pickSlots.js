@@ -1,6 +1,52 @@
 import { exec } from "../db.js";
 
 /**
+ * Compute draft order from previous season's playoff bracket + rosters.
+ * Mirrors the FE logic in standingsSlice.js exactly.
+ * Returns a slot_to_roster_id map: { "1": rosterId, ... }
+ * where slot 1 = worst team (first pick), slot N = champion (last pick).
+ */
+export const computeDraftOrderFromBracket = (playoffBracket, rosters) => {
+  const standingsSlot = {};
+
+  playoffBracket.forEach((match) => {
+    const isConsolationMatch =
+      (match.t1_from && match.t1_from.l) || (match.t2_from && match.t2_from.l);
+
+    if (match.w && !isConsolationMatch) {
+      if (match.r === 3) {
+        standingsSlot[match.w] = 1;  // champion
+        standingsSlot[match.l] = 2;  // runner-up
+      } else if (match.r === 2) {
+        standingsSlot[match.l] = 3;  // lost in semis
+      } else if (match.r === 1) {
+        standingsSlot[match.l] = 4;  // lost in quarters
+      }
+    }
+  });
+
+  // Sort best-to-worst: playoff teams first (by placement), then non-playoff by wins/points DESC
+  const sorted = [...rosters].sort((a, b) => {
+    return (
+      (standingsSlot[a.roster_id] || Infinity) - (standingsSlot[b.roster_id] || Infinity) ||
+      (b.settings?.wins ?? 0) - (a.settings?.wins ?? 0) ||
+      ((b.settings?.fpts ?? 0) + (b.settings?.fpts_decimal ?? 0) / 100) -
+        ((a.settings?.fpts ?? 0) + (a.settings?.fpts_decimal ?? 0) / 100)
+    );
+  });
+
+  // Reverse so worst team = slot 1 (first pick), champion = slot N (last pick)
+  const reversed = [...sorted].reverse();
+
+  const slotToRosterId = {};
+  reversed.forEach((roster, idx) => {
+    slotToRosterId[String(idx + 1)] = roster.roster_id;
+  });
+
+  return slotToRosterId;
+};
+
+/**
  * Returns a roster_id -> slot mapping for pick slot estimation.
  * Prefers the real draft order from Sleeper (offseason) over standings-based approximation (in-season).
  */
@@ -20,9 +66,10 @@ export const getPickSlotMap = async (leagueId) => {
   }
 
   // Fall back to current standings — last place = slot 1
+  // ROW_NUMBER (not RANK) ensures unique slots even when records are tied
   const standings = await exec(
     `SELECT roster_id,
-            RANK() OVER (ORDER BY wins ASC, points_for ASC) AS slot,
+            ROW_NUMBER() OVER (ORDER BY wins ASC, points_for ASC) AS slot,
             COUNT(*) OVER () AS total_rosters
      FROM rosters WHERE league_id = $1`,
     [leagueId],
