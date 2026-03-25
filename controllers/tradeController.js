@@ -173,7 +173,7 @@ const KEEPER_SLOTS = 8;
 const KEEPER_POOL = 96; // 8 keepers × 12 teams
 
 // Keeper-league pick discount: picks are worth less when top 96 players are kept
-const KEEPER_PICK_DISCOUNT = 0.55;
+const KEEPER_PICK_DISCOUNT = 0.80;
 
 // ── Shared trade helpers ─────────────────────────────────────────────────
 
@@ -271,11 +271,12 @@ function buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers =
 
 export const findDeals = async (req, res) => {
   try {
-    const { player_id, roster_id, league_id, deal_pref } = req.body;
+    const { player_id, pick_id, roster_id, league_id, deal_pref } = req.body;
     const year = parseInt(req.query.year) || new Date().getFullYear();
+    const isPickTarget = !!pick_id;
 
-    if (!player_id || !roster_id || !league_id) {
-      return res.status(400).json({ message: "player_id, roster_id, and league_id are required" });
+    if ((!player_id && !pick_id) || !roster_id || !league_id) {
+      return res.status(400).json({ message: "player_id or pick_id, plus roster_id and league_id are required" });
     }
 
     // 1. Fetch rosters with owner names
@@ -290,15 +291,6 @@ export const findDeals = async (req, res) => {
 
     const { withValues, playerMap } = enrichPlayers(players);
 
-    const selectedPlayer = playerMap[player_id];
-    if (!selectedPlayer) return res.status(404).json({ message: "Player not found" });
-
-    // Determine if this is a sell (own player) or buy (other team's player)
-    const ownerRosterId = rosters.find((r) =>
-      (r.player_ids ?? []).includes(player_id),
-    )?.roster_id;
-    const isSelling = ownerRosterId === parseInt(roster_id);
-
     // 3. Keeper-worthy pool (top 96 by bfbValue)
     const keeperWorthyIds = getKeeperWorthyIds(withValues);
 
@@ -306,7 +298,6 @@ export const findDeals = async (req, res) => {
     const teams = buildTeamAnalysis(rosters, playerMap, keeperWorthyIds);
 
     const myTeam = teams.find((t) => t.roster_id === parseInt(roster_id));
-    const selectedValue = selectedPlayer.bfbValue ?? 0;
 
     // 5. Pick slot map for valuing picks
     const [{ rosterToSlot }, draftPicks] = await Promise.all([
@@ -321,6 +312,402 @@ export const findDeals = async (req, res) => {
     // Discounted pick value for deal-matching thresholds (picks worth less in keeper leagues)
     const dealPickValue = (pick) =>
       Math.round(rawPickValue(pick) * KEEPER_PICK_DISCOUNT);
+
+    // ── PICK TARGET: deal generation for acquiring/selling a draft pick ──
+    if (isPickTarget) {
+      const targetPick = draftPicks.find((p) =>
+        p.season === pick_id.season &&
+        p.round === pick_id.round &&
+        p.original_roster_id === pick_id.original_roster_id,
+      );
+      if (!targetPick) return res.status(404).json({ message: "Pick not found" });
+
+      const targetPickFormatted = formatPick(targetPick, rosterToSlot);
+      const targetValue = targetPickFormatted.pick_value;
+      const pickOwnerRosterId = targetPick.current_roster_id;
+      const isSelling = pickOwnerRosterId === parseInt(roster_id);
+
+      const deals = [];
+
+      if (isSelling) {
+        // ── SELLING OUR PICK: find teams that want it ──
+        // My keeper floor doesn't change (not losing a player)
+        const myCurrentFloor = myTeam.keeperWorthy.length >= KEEPER_SLOTS
+          ? myTeam.keeperWorthy[KEEPER_SLOTS - 1].bfbValue ?? 0
+          : 0;
+
+        for (const team of teams) {
+          if (team.roster_id === parseInt(roster_id)) continue;
+
+          // For picks (especially 1st rounders), consider ALL players on a team —
+          // not just surplus. Teams will trade non-core players for premium picks.
+          const teamPlayers = team.players ?? [];
+
+          // 1. Pick for Player (1-for-1)
+          const p4pCandidates = teamPlayers
+            .filter((p) => {
+              const val = p.bfbValue ?? 0;
+              const inRange = val >= targetValue * 0.65 && val <= targetValue * 1.35;
+              const wouldKeep = val > myCurrentFloor;
+              // The other team should be willing to give this player up —
+              // player should NOT be in their top 4 keepers (core untouchables)
+              const isCore = team.keeperWorthy.slice(0, 4).some((k) => k.id === p.id);
+              return inRange && wouldKeep && !isCore;
+            })
+            .sort((a, b) => {
+              const aFills = myTeam.needs.includes(a.position) ? 0 : 1;
+              const bFills = myTeam.needs.includes(b.position) ? 0 : 1;
+              if (aFills !== bFills) return aFills - bFills;
+              return Math.abs((a.bfbValue ?? 0) - targetValue) - Math.abs((b.bfbValue ?? 0) - targetValue);
+            });
+
+          if (p4pCandidates.length > 0) {
+            const candidate = p4pCandidates[0];
+            const fairness = computeFairness(
+              [], targetValue, 1,
+              [candidate.bfbValue ?? 0], 0, 1,
+            );
+            deals.push({
+              target_team: { roster_id: team.roster_id, display_name: team.display_name },
+              type: "pick_for_player",
+              give: { players: [], picks: [targetPickFormatted] },
+              receive: { players: [formatPlayer(candidate)], picks: [] },
+              fairness,
+              rationale: `Your pick for ${candidate.position}${myTeam.needs.includes(candidate.position) ? " (fills need)" : ""} from ${team.display_name}`,
+            });
+          }
+
+          // 2. Pick for Player + Picks
+          const lowerCandidates = teamPlayers
+            .filter((p) => {
+              const val = p.bfbValue ?? 0;
+              const wouldKeep = val > myCurrentFloor;
+              const isCore = team.keeperWorthy.slice(0, 4).some((k) => k.id === p.id);
+              return val >= targetValue * 0.4 && val < targetValue * 0.75 && wouldKeep && !isCore;
+            })
+            .sort((a, b) => (b.bfbValue ?? 0) - (a.bfbValue ?? 0));
+
+          const teamPicks = draftPicks.filter((p) => p.current_roster_id === team.roster_id);
+          if (lowerCandidates.length > 0 && teamPicks.length > 0) {
+            const basePlayer = lowerCandidates[0];
+            const gap = targetValue - (basePlayer.bfbValue ?? 0);
+            const valuedPicks = teamPicks
+              .map((p) => ({ ...p, pick_value: dealPickValue(p), raw_pick_value: rawPickValue(p) }))
+              .sort((a, b) => b.pick_value - a.pick_value);
+
+            let picksToInclude = [];
+            let pickTotal = 0;
+            for (const pick of valuedPicks) {
+              if (pickTotal >= gap * 1.1) break;
+              picksToInclude.push(pick);
+              pickTotal += pick.pick_value;
+              if (picksToInclude.length >= 2) break;
+            }
+
+            if (pickTotal >= gap * 0.6) {
+              const rawPickTotal = picksToInclude.reduce((s, p) => s + p.raw_pick_value, 0);
+              const fairness = computeFairness(
+                [], targetValue, 1 + picksToInclude.length,
+                [basePlayer.bfbValue ?? 0], rawPickTotal, 1,
+              );
+              deals.push({
+                target_team: { roster_id: team.roster_id, display_name: team.display_name },
+                type: "player_plus_picks",
+                give: { players: [], picks: [targetPickFormatted] },
+                receive: {
+                  players: [formatPlayer(basePlayer)],
+                  picks: picksToInclude.map((p) => formatPick(p, rosterToSlot)),
+                },
+                fairness,
+                rationale: `${basePlayer.position} + pick${picksToInclude.length > 1 ? "s" : ""} from ${team.display_name} for your pick`,
+              });
+            }
+          }
+
+          // 3. Pick for Multiple Players (2-for-1)
+          const multiCandidates = teamPlayers
+            .filter((p) => {
+              const isCore = team.keeperWorthy.slice(0, 4).some((k) => k.id === p.id);
+              return (p.bfbValue ?? 0) >= targetValue * 0.25 && !isCore;
+            })
+            .slice(0, 6);
+
+          if (multiCandidates.length >= 2) {
+            for (let i = 0; i < multiCandidates.length; i++) {
+              for (let j = i + 1; j < multiCandidates.length; j++) {
+                const p1 = multiCandidates[i];
+                const p2 = multiCandidates[j];
+                const comboValue = (p1.bfbValue ?? 0) + (p2.bfbValue ?? 0);
+                const eitherKeepable = (p1.bfbValue ?? 0) > myCurrentFloor || (p2.bfbValue ?? 0) > myCurrentFloor;
+
+                if (comboValue >= targetValue * 0.85 && comboValue <= targetValue * 1.6 && eitherKeepable) {
+                  const fairness = computeFairness(
+                    [], targetValue, 2,
+                    [(p1.bfbValue ?? 0), (p2.bfbValue ?? 0)].sort((a, b) => b - a), 0, 1,
+                  );
+                  deals.push({
+                    target_team: { roster_id: team.roster_id, display_name: team.display_name },
+                    type: "multi_player",
+                    give: { players: [], picks: [targetPickFormatted] },
+                    receive: { players: [formatPlayer(p1), formatPlayer(p2)], picks: [] },
+                    fairness,
+                    rationale: `2-for-1: ${p1.position} + ${p2.position} from ${team.display_name} for your pick`,
+                  });
+                  break;
+                }
+              }
+              if (deals.filter((d) => d.target_team.roster_id === team.roster_id && d.type === "multi_player").length > 0) break;
+            }
+          }
+
+          // 4. Picks-only swap: trade your pick for their picks
+          if (teamPicks.length > 0) {
+            const valuedTeamPicks = teamPicks
+              .map((p) => ({ ...p, pick_value: dealPickValue(p), raw_pick_value: rawPickValue(p) }))
+              .filter((p) => p.raw_pick_value < targetValue) // only accept lesser picks that combine to match
+              .sort((a, b) => b.pick_value - a.pick_value);
+
+            let swapPicks = [];
+            let swapTotal = 0;
+            let swapRawTotal = 0;
+            for (const pick of valuedTeamPicks) {
+              if (swapTotal >= targetValue * 0.9) break;
+              swapPicks.push(pick);
+              swapTotal += pick.pick_value;
+              swapRawTotal += pick.raw_pick_value;
+              if (swapPicks.length >= 3) break;
+            }
+
+            if (swapPicks.length >= 2 && swapTotal >= targetValue * 0.6) {
+              const fairness = computeFairness(
+                [], targetValue, swapPicks.length,
+                [], swapRawTotal, 1,
+              );
+              deals.push({
+                target_team: { roster_id: team.roster_id, display_name: team.display_name },
+                type: "picks_only",
+                give: { players: [], picks: [targetPickFormatted] },
+                receive: {
+                  players: [],
+                  picks: swapPicks.map((p) => formatPick(p, rosterToSlot)),
+                },
+                fairness,
+                rationale: `Trade down: ${swapPicks.length} picks from ${team.display_name} for your premium pick`,
+              });
+            }
+          }
+        }
+      } else {
+        // ── BUYING: find what we can offer to acquire this pick ──
+        const sellerTeam = teams.find((t) => t.roster_id === pickOwnerRosterId);
+        if (!sellerTeam) return res.json({ pick: targetPickFormatted, target_type: "pick", team_needs: myTeam.needs, deals: [] });
+
+        // Players I could rationally offer — giving them away doesn't tank my keepers
+        const myTradeable = myTeam.players.filter((p) => {
+          // Would my top-8 value survive losing this player?
+          const remaining = myTeam.players
+            .filter((x) => x.id !== p.id)
+            .sort((a, b) => (b.bfbValue ?? 0) - (a.bfbValue ?? 0));
+          const newTop8 = remaining.slice(0, KEEPER_SLOTS).reduce((s, x) => s + (x.bfbValue ?? 0), 0);
+          const oldTop8 = [...myTeam.players]
+            .sort((a, b) => (b.bfbValue ?? 0) - (a.bfbValue ?? 0))
+            .slice(0, KEEPER_SLOTS)
+            .reduce((s, x) => s + (x.bfbValue ?? 0), 0);
+          return newTop8 >= oldTop8 * 0.9; // willing to lose up to 10% for a pick
+        });
+
+        // 1. Player for Pick (1-for-1)
+        const p4pCandidates = myTradeable
+          .filter((p) => {
+            const val = p.bfbValue ?? 0;
+            const inRange = val >= targetValue * 0.65 && val <= targetValue * 1.35;
+            // Seller must benefit: player cracks their top 8
+            const sellerFloor = sellerTeam.keeperWorthy.length >= KEEPER_SLOTS
+              ? sellerTeam.keeperWorthy[KEEPER_SLOTS - 1].bfbValue ?? 0
+              : 0;
+            return inRange && val > sellerFloor;
+          })
+          .sort((a, b) => {
+            const aFills = sellerTeam.needs.includes(a.position) ? 0 : 1;
+            const bFills = sellerTeam.needs.includes(b.position) ? 0 : 1;
+            if (aFills !== bFills) return aFills - bFills;
+            return Math.abs((a.bfbValue ?? 0) - targetValue) - Math.abs((b.bfbValue ?? 0) - targetValue);
+          });
+
+        if (p4pCandidates.length > 0) {
+          const candidate = p4pCandidates[0];
+          const fairness = computeFairness(
+            [candidate.bfbValue ?? 0], 0, 1,
+            [], targetValue, 1,
+          );
+          deals.push({
+            target_team: { roster_id: sellerTeam.roster_id, display_name: sellerTeam.display_name },
+            type: "player_for_pick",
+            give: { players: [formatPlayer(candidate)], picks: [] },
+            receive: { players: [], picks: [targetPickFormatted] },
+            fairness,
+            rationale: `Send ${candidate.position}${sellerTeam.needs.includes(candidate.position) ? " (fills their need)" : ""} to ${sellerTeam.display_name} for their pick`,
+          });
+        }
+
+        // 2. Player + Picks for Pick
+        const myPicks = draftPicks.filter((p) => p.current_roster_id === parseInt(roster_id));
+        const playerPlusPick = myTradeable
+          .filter((p) => {
+            const val = p.bfbValue ?? 0;
+            return val >= targetValue * 0.4 && val < targetValue * 0.75;
+          })
+          .sort((a, b) => (b.bfbValue ?? 0) - (a.bfbValue ?? 0));
+
+        if (playerPlusPick.length > 0 && myPicks.length > 0) {
+          const basePlayer = playerPlusPick[0];
+          const gap = targetValue - (basePlayer.bfbValue ?? 0);
+          const valuedPicks = myPicks
+            .map((p) => ({ ...p, pick_value: dealPickValue(p), raw_pick_value: rawPickValue(p) }))
+            .sort((a, b) => b.pick_value - a.pick_value);
+
+          let picksToInclude = [];
+          let pickTotal = 0;
+          for (const pick of valuedPicks) {
+            if (pickTotal >= gap * 1.1) break;
+            picksToInclude.push(pick);
+            pickTotal += pick.pick_value;
+            if (picksToInclude.length >= 2) break;
+          }
+
+          if (pickTotal >= gap * 0.6) {
+            const rawPickTotal = picksToInclude.reduce((s, p) => s + p.raw_pick_value, 0);
+            const fairness = computeFairness(
+              [basePlayer.bfbValue ?? 0], rawPickTotal, 1,
+              [], targetValue, 1 + picksToInclude.length,
+            );
+            deals.push({
+              target_team: { roster_id: sellerTeam.roster_id, display_name: sellerTeam.display_name },
+              type: "player_plus_picks",
+              give: {
+                players: [formatPlayer(basePlayer)],
+                picks: picksToInclude.map((p) => formatPick(p, rosterToSlot)),
+              },
+              receive: { players: [], picks: [targetPickFormatted] },
+              fairness,
+              rationale: `Send ${basePlayer.position} + pick${picksToInclude.length > 1 ? "s" : ""} to ${sellerTeam.display_name} for their pick`,
+            });
+          }
+        }
+
+        // 3. Multi-player for Pick (2-for-1)
+        const multiCandidates = myTradeable
+          .filter((p) => (p.bfbValue ?? 0) >= targetValue * 0.25)
+          .slice(0, 6);
+
+        if (multiCandidates.length >= 2) {
+          for (let i = 0; i < multiCandidates.length; i++) {
+            for (let j = i + 1; j < multiCandidates.length; j++) {
+              const p1 = multiCandidates[i];
+              const p2 = multiCandidates[j];
+              const comboValue = (p1.bfbValue ?? 0) + (p2.bfbValue ?? 0);
+              const sellerBenefits = comboValue >= targetValue * 0.85;
+
+              if (comboValue >= targetValue * 0.85 && comboValue <= targetValue * 1.6 && sellerBenefits) {
+                const fairness = computeFairness(
+                  [(p1.bfbValue ?? 0), (p2.bfbValue ?? 0)].sort((a, b) => b - a), 0, 1,
+                  [], targetValue, 2,
+                );
+                deals.push({
+                  target_team: { roster_id: sellerTeam.roster_id, display_name: sellerTeam.display_name },
+                  type: "multi_player",
+                  give: { players: [formatPlayer(p1), formatPlayer(p2)], picks: [] },
+                  receive: { players: [], picks: [targetPickFormatted] },
+                  fairness,
+                  rationale: `2-for-1: send ${p1.position} + ${p2.position} to ${sellerTeam.display_name} for their pick`,
+                });
+                break;
+              }
+            }
+            if (deals.filter((d) => d.type === "multi_player").length > 0) break;
+          }
+        }
+
+        // 4. Picks-only: trade up by sending multiple of my picks (reuse myPicks from above)
+        if (myPicks.length > 0) {
+          const valuedMyPicks = myPicks
+            .map((p) => ({ ...p, pick_value: dealPickValue(p), raw_pick_value: rawPickValue(p) }))
+            .filter((p) => p.raw_pick_value < targetValue)
+            .sort((a, b) => b.pick_value - a.pick_value);
+
+          let swapPicks = [];
+          let swapTotal = 0;
+          let swapRawTotal = 0;
+          for (const pick of valuedMyPicks) {
+            if (swapTotal >= targetValue * 0.9) break;
+            swapPicks.push(pick);
+            swapTotal += pick.pick_value;
+            swapRawTotal += pick.raw_pick_value;
+            if (swapPicks.length >= 3) break;
+          }
+
+          if (swapPicks.length >= 2 && swapTotal >= targetValue * 0.6) {
+            const fairness = computeFairness(
+              [], swapRawTotal, 1,
+              [], targetValue, swapPicks.length,
+            );
+            deals.push({
+              target_team: { roster_id: sellerTeam.roster_id, display_name: sellerTeam.display_name },
+              type: "picks_only",
+              give: {
+                players: [],
+                picks: swapPicks.map((p) => formatPick(p, rosterToSlot)),
+              },
+              receive: { players: [], picks: [targetPickFormatted] },
+              fairness,
+              rationale: `Trade up: send ${swapPicks.length} picks to ${sellerTeam.display_name} for their premium pick`,
+            });
+          }
+        }
+      }
+
+      // Filter, rank, deduplicate — same logic as player deals
+      const filteredDeals = !deal_pref || deal_pref === "any"
+        ? deals
+        : deals.filter((d) => {
+            if (deal_pref === "players_only") return d.type === "pick_for_player" || d.type === "player_for_pick" || d.type === "multi_player";
+            if (deal_pref === "player_plus_picks") return d.type === "player_plus_picks" || d.type === "picks_only";
+            return true;
+          });
+
+      filteredDeals.sort((a, b) => Math.abs(a.fairness - 50) - Math.abs(b.fairness - 50));
+
+      const seen = new Set();
+      const topDeals = [];
+      for (const deal of filteredDeals) {
+        const key = `${deal.type}-${deal.target_team.roster_id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        topDeals.push(deal);
+        if (topDeals.length >= 4) break;
+      }
+
+      return res.json({
+        pick: targetPickFormatted,
+        target_type: "pick",
+        team_needs: myTeam.needs,
+        team_surplus_count: myTeam.surplus.length,
+        is_selling: isSelling,
+        deals: topDeals,
+      });
+    }
+
+    // ── PLAYER TARGET (existing logic) ──
+    const selectedPlayer = playerMap[player_id];
+    if (!selectedPlayer) return res.status(404).json({ message: "Player not found" });
+
+    // Determine if this is a sell (own player) or buy (other team's player)
+    const ownerRosterId = rosters.find((r) =>
+      (r.player_ids ?? []).includes(player_id),
+    )?.roster_id;
+    const isSelling = ownerRosterId === parseInt(roster_id);
+
+    const selectedValue = selectedPlayer.bfbValue ?? 0;
 
     // 6. Generate deals
     const deals = [];

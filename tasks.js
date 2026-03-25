@@ -1,14 +1,12 @@
 import fetch from "node-fetch";
 import cron from "node-cron";
 import { spawn } from "child_process";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
 import { getClient } from "./db.js";
 import { runKeeperModel } from "./utils/pythonBridge.js";
 import { sendGroupMe } from "./utils/groupme.js";
 import { attemptSelfHeal } from "./utils/selfHeal.js";
 import { computeDraftOrderFromBracket } from "./utils/pickSlots.js";
+import { generateTradeReport } from "./scripts/generate_trade_report.js";
 
 async function updatePlayerStats(year = new Date().getFullYear()) {
   console.log("Start Update Player Stats.");
@@ -103,66 +101,9 @@ async function runKtcScraper() {
 }
 
 async function runTradeReport() {
-  return new Promise((resolve, reject) => {
-    const proc = spawn("python3", ["scripts/generate_trade_report.py"], {
-      env: { ...process.env },
-    });
-    let stderr = "";
-    proc.stderr.on("data", (d) => {
-      stderr += d.toString();
-      console.error(`trade_report stderr: ${d}`);
-    });
-    proc.on("close", (code) => {
-      if (code === 0) {
-        console.log("Trade report generated.");
-        resolve();
-      } else {
-        reject(
-          new Error(
-            `Trade report exited with code ${code}: ${stderr.slice(-200)}`,
-          ),
-        );
-      }
-    });
-    proc.on("error", (err) =>
-      reject(new Error(`Trade report failed to start: ${err.message}`)),
-    );
-  });
-}
-
-function parseTradeReportSummary() {
-  const reportPath = path.join(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "output",
-    "trade_report.txt",
-  );
-  const report = fs.readFileSync(reportPath, "utf-8");
-  const lines = report.split("\n");
-
-  let summary = "";
-  let inSection = false;
-
-  for (const line of lines) {
-    if (line.startsWith("SURPLUS (")) {
-      inSection = true;
-      summary += "📊 WEEKLY TRADE REPORT\n\n";
-      summary += line + "\n";
-    } else if (line.startsWith("SUGGESTED TRADE FITS:")) {
-      inSection = true;
-      summary += "\n" + line + "\n";
-    } else if (line.startsWith("NEEDS (")) {
-      inSection = false;
-    } else if (
-      (inSection && line.startsWith("DIMINISHING VALUE")) ||
-      (inSection && line.startsWith("==="))
-    ) {
-      inSection = false;
-    } else if (inSection && line.trim() && !line.startsWith("---")) {
-      summary += line + "\n";
-    }
-  }
-
-  return summary.trim() || "No surplus players or trade fits this week.";
+  const report = await generateTradeReport();
+  console.log("Trade report generated.");
+  return report;
 }
 
 async function syncLeague(leagueId) {
@@ -384,9 +325,8 @@ function startCronJobs() {
   cron.schedule("0 2 * * 3", async () => {
     console.log("[cron] Generating trade report...");
     try {
-      await runTradeReport();
-      const summary = parseTradeReportSummary();
-      await sendGroupMe(summary);
+      const report = await runTradeReport();
+      await sendGroupMe(report.trim());
       console.log("[cron] Trade report summary sent.");
     } catch (err) {
       console.error("[cron] Trade report failed:", err);
