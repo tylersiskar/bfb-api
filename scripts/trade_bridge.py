@@ -18,10 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from trade_calculator import TradeCalculator, REPLACEMENT_LEVEL
 
 
-def evaluate_trade(data):
+def evaluate_trade(calc, data):
     """Evaluate a trade between two sides."""
-    calc = TradeCalculator()
-
     result = calc.evaluate_trade(
         team_a_roster=data["team_a_roster"],
         team_b_roster=data["team_b_roster"],
@@ -36,9 +34,8 @@ def evaluate_trade(data):
     return result.to_dict()
 
 
-def get_player_value(data):
+def get_player_value(calc, data):
     """Get a single player's trade value profile."""
-    calc = TradeCalculator()
     result = calc.get_player_value(
         data["player_name"],
         data.get("position"),
@@ -47,9 +44,8 @@ def get_player_value(data):
     return result
 
 
-def analyze_needs(data):
+def analyze_needs(calc, data):
     """Analyze a roster's positional needs."""
-    calc = TradeCalculator()
     roster = data["roster"]
     needs = calc.analyze_roster_needs(roster, data.get("team_name", "Team"))
     return needs
@@ -67,22 +63,24 @@ def main():
 
     # Suppress print statements from trade_calculator during API calls
     import io
-    sys.stderr = io.StringIO()
+    from contextlib import redirect_stderr
+    calc = TradeCalculator()
 
-    try:
-        if action == "evaluate":
-            result = evaluate_trade(data)
-        elif action == "player_value":
-            result = get_player_value(data)
-        elif action == "needs":
-            result = analyze_needs(data)
-        else:
-            result = {"error": f"Unknown action: {action}"}
+    with redirect_stderr(io.StringIO()):
+        try:
+            if action == "evaluate":
+                result = evaluate_trade(calc, data)
+            elif action == "player_value":
+                result = get_player_value(calc, data)
+            elif action == "needs":
+                result = analyze_needs(calc, data)
+            else:
+                result = {"error": f"Unknown action: {action}"}
 
-        print(json.dumps(result))
-    except Exception as e:
-        print(json.dumps({"error": str(e)}))
-        sys.exit(1)
+            print(json.dumps(result))
+        except Exception as e:
+            print(json.dumps({"error": str(e)}))
+            sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getRostersWithOwners, getSkillPlayersByIds, getDraftPicksByLeague } from "../db.js";
-import { getPickValue, calculateTradeValue } from "../utils/calculations.js";
+import { getPickValue, applyConsolidationDiscount } from "../utils/calculations.js";
 import { getPickSlotMap } from "../utils/pickSlots.js";
 import { enrichPlayers, getKeeperWorthyIds, fetchSleeperKeepers } from "../utils/league.js";
 
@@ -18,7 +18,6 @@ const REPORT_PATH = path.join(OUTPUT_DIR, "trade_report.txt");
 
 const LEAGUE_ID = process.env.LEAGUE_ID || "1312089696964202496";
 const KEEPER_SLOTS = 8;
-const KEEPER_PICK_DISCOUNT = 0.80;
 const STARTER_COUNTS = { QB: 1, RB: 2, WR: 3, TE: 1 };
 
 // ── Helpers ──
@@ -31,11 +30,11 @@ function shortName(fullName) {
   return `${parts[0][0]}. ${last}`;
 }
 
-function computeFairness(aValues, aPickVal, bAssetCount, bValues, bPickVal, aAssetCount) {
-  const aSide = calculateTradeValue(aValues, aPickVal, bAssetCount);
-  const bSide = calculateTradeValue(bValues, bPickVal, aAssetCount);
-  const total = aSide.total + bSide.total || 1;
-  return Math.round((aSide.total / total) * 100);
+function computeRawFairness(aValues, aPickVal, bValues, bPickVal) {
+  const aTotal = aValues.reduce((s, v) => s + v, 0) + aPickVal;
+  const bTotal = bValues.reduce((s, v) => s + v, 0) + bPickVal;
+  const total = aTotal + bTotal || 1;
+  return Math.round((aTotal / total) * 100);
 }
 
 function formatPlayer(p) {
@@ -140,8 +139,6 @@ export async function generateTradeReport() {
 
   const rawPickValue = (pick) =>
     getPickValue(pick.round, rosterToSlot[pick.original_roster_id] ?? 6, pick.season > year ? 1 : 0);
-  const dealPickValue = (pick) =>
-    Math.round(rawPickValue(pick) * KEEPER_PICK_DISCOUNT);
 
   const pickLabel = (pick) => {
     const slot = rosterToSlot[pick.original_roster_id] ?? 6;
@@ -160,10 +157,14 @@ export async function generateTradeReport() {
     const myPicks = draftPicks.filter((p) => p.current_roster_id === rosterId);
     const myTradePicks = myPicks
       .filter((p) => p.round <= 3)
-      .map((p) => ({ ...p, pick_value: dealPickValue(p), raw_pick_value: rawPickValue(p) }))
+      .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
       .sort((a, b) => b.pick_value - a.pick_value);
 
     // ── Upgrades ──
+    const usedUpgradePickKeys = new Set(
+      allUpgrades.flatMap((d) => [...(d._pickKeys ?? [])]),
+    );
+
     for (const myPlayer of myTop8) {
       const pos = myPlayer.position;
       const myVal = myPlayer.bfbValue ?? 0;
@@ -179,28 +180,65 @@ export async function generateTradeReport() {
           const targetVal = target.bfbValue ?? 0;
           const gap = targetVal - myVal;
 
-          let picksToInclude = [];
-          let pickTotal = 0;
-          for (const pick of myTradePicks) {
-            if (allUpgrades.some((d) => d._pickKeys?.has(`${pick.round}-${pick.season}-${pick.original_roster_id}`))) continue;
-            if (pickTotal >= gap * 1.1) break;
-            picksToInclude.push(pick);
-            pickTotal += pick.pick_value;
-            if (picksToInclude.length >= 2) break;
+          // Other team's late picks for "change back"
+          const theirLatePicks = draftPicks
+            .filter((p) => p.current_roster_id === team.roster_id && p.round >= 3)
+            .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
+            .sort((a, b) => a.pick_value - b.pick_value);
+
+          // Strategy 1: single anchor pick (80%-130% of gap)
+          const available = myTradePicks.filter(
+            (p) => !usedUpgradePickKeys.has(`${p.round}-${p.season}-${p.original_roster_id}`),
+          );
+          let givePicks = [];
+          let receivePicks = [];
+
+          const anchor = available.find((p) => p.pick_value >= gap * 0.8 && p.pick_value <= gap * 1.3);
+          if (anchor) {
+            givePicks = [anchor];
+          } else {
+            // Strategy 2: overshooter + change back
+            const overshooter = available.find((p) => p.pick_value > gap * 1.3 && p.pick_value <= gap * 2.5);
+            if (overshooter && theirLatePicks.length > 0) {
+              const overshoot = overshooter.pick_value - gap;
+              const changePick = theirLatePicks.find(
+                (p) => p.pick_value >= overshoot * 0.4 && p.pick_value <= overshoot * 1.5,
+              );
+              if (changePick) {
+                givePicks = [overshooter];
+                receivePicks = [changePick];
+              }
+            }
+            // Strategy 3: greedy fill with consolidation penalty
+            if (givePicks.length === 0) {
+              let pickTotal = 0;
+              for (const pick of available) {
+                if (pickTotal >= gap * 1.1) break;
+                givePicks.push(pick);
+                pickTotal += pick.pick_value;
+                if (givePicks.length >= 2) break;
+              }
+              const discounted = applyConsolidationDiscount(pickTotal, givePicks.length);
+              if (givePicks.length === 0 || discounted < gap * 0.6) {
+                givePicks = [];
+              }
+            }
           }
 
-          if (picksToInclude.length > 0 && pickTotal >= gap * 0.4) {
-            const rawPickTotal = picksToInclude.reduce((s, p) => s + p.raw_pick_value, 0);
-            const fairness = computeFairness(
-              [myVal], rawPickTotal, 1,
-              [targetVal], 0, 1 + picksToInclude.length,
+          if (givePicks.length > 0) {
+            const givePickTotal = givePicks.reduce((s, p) => s + p.pick_value, 0);
+            const receivePickTotal = receivePicks.reduce((s, p) => s + p.pick_value, 0);
+            const fairness = computeRawFairness(
+              [myVal], givePickTotal,
+              [targetVal], receivePickTotal,
             );
-            const pickKeys = new Set(picksToInclude.map((p) => `${p.round}-${p.season}-${p.original_roster_id}`));
+            const pickKeys = new Set(givePicks.map((p) => `${p.round}-${p.season}-${p.original_roster_id}`));
+            for (const k of pickKeys) usedUpgradePickKeys.add(k);
             allUpgrades.push({
               from: myTeam.display_name,
               to: team.display_name,
-              give: { player: formatPlayer(myPlayer), picks: picksToInclude },
-              receive: { player: formatPlayer(target) },
+              give: { player: formatPlayer(myPlayer), picks: givePicks },
+              receive: { player: formatPlayer(target), picks: receivePicks },
               fairness,
               category: "upgrade",
               _pickKeys: pickKeys,
@@ -236,6 +274,8 @@ export async function generateTradeReport() {
 
         if (teamAnchorPicks.length === 0) continue;
 
+        if (effectiveVal <= 0) continue;
+
         const anchor = teamAnchorPicks.find((p) => p.pick_value >= effectiveVal * 0.5)
           || teamAnchorPicks[teamAnchorPicks.length - 1];
 
@@ -251,9 +291,9 @@ export async function generateTradeReport() {
         }
 
         if (anchor.pick_value >= effectiveVal * 0.5) {
-          const fairness = computeFairness(
-            [surplusVal], givePicks.reduce((s, p) => s + rawPickValue(p), 0), 1,
-            [], anchor.pick_value, 1 + givePicks.length,
+          const fairness = computeRawFairness(
+            [effectiveVal], givePicks.reduce((s, p) => s + rawPickValue(p), 0),
+            [], anchor.pick_value,
           );
 
           allSurplus.push({
@@ -313,6 +353,7 @@ export async function generateTradeReport() {
       for (const pick of deal.give.picks) w(`  ${pickLabel(pick)}`);
       w(`${deal.to} sends:`);
       w(`  ${shortName(deal.receive.player.full_name)} (${deal.receive.player.position})`);
+      for (const pick of deal.receive.picks ?? []) w(`  ${pickLabel(pick)}`);
       w("----------");
     }
   } else {

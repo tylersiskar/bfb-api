@@ -41,36 +41,49 @@ export const computePlayerValues = (players) => {
 };
 
 // ── Pick Valuation ──────────────────────────────────────────────────────
-// Per-pick curve: 1.01 is elite (8000), 1.02-3.12 exponential decay,
-// rounds 4-8 flat per-round. Future picks depreciate at 80%/year.
+// Perceived-value curve: reflects market/trade value, not expected production.
+// Round 1 is deliberately flat (a "first rounder" carries prestige).
+// Sharp cliff between round 1 and 2 captures the psychological round premium.
+// Future picks depreciate at 80%/year.
 
 const PICK_FUTURE_DEPRECIATION = 0.8;
-const PICK_ELITE_VALUE = 7000; // 1.01
-const PICK_DECAY_START = 3200; // 1.02
-const PICK_DECAY_END = 300; // 3.12
 const LEAGUE_SIZE = 12;
+
+// Per-slot values for rounds 1-3 (slots 1-12). Index 0 = slot 1.
+// Scaled to sit below elite player values — in a keeper league the draft
+// pool is the ~97th+ best players, so picks shouldn't rival top assets.
+const ROUND_1_VALUES = [5500, 5200, 4900, 4600, 4250, 3900, 3600, 3300, 3100, 2900, 2750, 2600];
+const ROUND_2_VALUES = [1800, 1650, 1500, 1400, 1300, 1150, 1000, 850, 725, 650, 575, 500];
+const ROUND_3_VALUES = [450, 425, 400, 385, 370, 350, 325, 300, 280, 265, 255, 250];
+
+const PICK_ROUND_VALUES = { 1: ROUND_1_VALUES, 2: ROUND_2_VALUES, 3: ROUND_3_VALUES };
 
 // Flat per-round values for rounds 4-8
 const LATE_ROUND_VALUES = { 4: 200, 5: 150, 6: 100, 7: 75, 8: 50 };
 
 export const getPickValue = (round, slot, yearsOut = 0) => {
-  const overallPick = (round - 1) * LEAGUE_SIZE + slot;
-  let base;
+  const clampedSlot = Math.max(1, Math.min(slot, LEAGUE_SIZE));
+  const roundValues = PICK_ROUND_VALUES[round];
 
-  if (overallPick === 1) {
-    // 1.01 — elite tier, stands alone
-    base = PICK_ELITE_VALUE;
-  } else if (overallPick <= 36) {
-    // Picks 1.02 through 3.12: exponential decay
-    base =
-      PICK_DECAY_START *
-      Math.pow(PICK_DECAY_END / PICK_DECAY_START, (overallPick - 2) / 34);
+  let base;
+  if (roundValues) {
+    base = roundValues[clampedSlot - 1];
   } else {
-    // Rounds 4-8: flat per-round value
     base = LATE_ROUND_VALUES[round] ?? 50;
   }
 
   return Math.round(base * Math.pow(PICK_FUTURE_DEPRECIATION, yearsOut));
+};
+
+// ── Pick Consolidation Penalty ──────────────────────────────────────────
+// When multiple picks are combined to match one pick's value, the package
+// is worth less than the sum of parts — you always overpay to trade up.
+const CONSOLIDATION_DISCOUNT = { 1: 1.0, 2: 0.85, 3: 0.70 };
+
+export const applyConsolidationDiscount = (totalPickValue, pickCount) => {
+  if (pickCount <= 1) return totalPickValue;
+  const factor = CONSOLIDATION_DISCOUNT[Math.min(pickCount, 3)] ?? 0.70;
+  return Math.round(totalPickValue * factor);
 };
 
 // ── Trade Value Aggregation ─────────────────────────────────────────────

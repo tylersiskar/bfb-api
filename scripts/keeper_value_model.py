@@ -18,26 +18,22 @@ import os
 from datetime import datetime
 from collections import defaultdict
 
+from league_config import (
+    KEEPER_SLOTS, ROSTER_SIZE, NUM_TEAMS, POSITIONS,
+    STARTERS, FLEX_ELIGIBLE,
+)
+
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
 SEASONS = list(range(2018, 2026))  # pull 8 years of data (2018-2025)
-KEEPER_SLOTS = 8
-ROSTER_SIZE = 16
 PROJECTION_YEARS = 4              # how far ahead to project
 DISCOUNT_RATE = 0.18              # annual uncertainty discount
 MIN_GAMES = 10                    # must play 10+ games to qualify
-POSITIONS = ["QB", "RB", "WR", "TE"]
-NUM_TEAMS = 12
 
 # Draft capital — how much weight to give draft position for rookies
 # Top picks at premium positions are valuable keeper assets even before playing
 DRAFT_CAPITAL_DECAY = 0.5         # draft capital loses 50% value per year without production
 DRAFT_BLEND_GAMES = 17            # full season of games before production fully replaces draft capital
-
-# Starting lineup — drives positional scarcity calculation
-STARTERS = {"QB": 1, "RB": 2, "WR": 3, "TE": 1, "FLEX": 1}
-# FLEX-eligible positions get extra demand
-FLEX_ELIGIBLE = ["RB", "WR", "TE"]
 
 # positional weights for composite score
 WEIGHTS = {

@@ -3,6 +3,7 @@ import {
   getPickValue,
   calculateTradeValue,
   applyEliteCurve,
+  applyConsolidationDiscount,
 } from "../utils/calculations.js";
 import { getPickSlotMap } from "../utils/pickSlots.js";
 import { runTradeBridge } from "../utils/pythonBridge.js";
@@ -172,9 +173,6 @@ export const calculateTrade = async (req, res) => {
 const KEEPER_SLOTS = 8;
 const KEEPER_POOL = 96; // 8 keepers × 12 teams
 
-// Keeper-league pick discount: picks are worth less when top 96 players are kept
-const KEEPER_PICK_DISCOUNT = 0.80;
-
 // ── Shared trade helpers ─────────────────────────────────────────────────
 
 // What would a team's 8th-best keeper value be if a player is removed?
@@ -305,13 +303,9 @@ export const findDeals = async (req, res) => {
       getDraftPicksByLeague(league_id),
     ]);
 
-    // Undiscounted pick value (matches trade calculator fairness)
+    // Pick value using the perceived-value curve (no separate keeper discount needed)
     const rawPickValue = (pick) =>
       getPickValue(pick.round, rosterToSlot[pick.original_roster_id] ?? 6, pick.season > year ? 1 : 0);
-
-    // Discounted pick value for deal-matching thresholds (picks worth less in keeper leagues)
-    const dealPickValue = (pick) =>
-      Math.round(rawPickValue(pick) * KEEPER_PICK_DISCOUNT);
 
     // ── PICK TARGET: deal generation for acquiring/selling a draft pick ──
     if (isPickTarget) {
@@ -392,7 +386,7 @@ export const findDeals = async (req, res) => {
             const basePlayer = lowerCandidates[0];
             const gap = targetValue - (basePlayer.bfbValue ?? 0);
             const valuedPicks = teamPicks
-              .map((p) => ({ ...p, pick_value: dealPickValue(p), raw_pick_value: rawPickValue(p) }))
+              .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
               .sort((a, b) => b.pick_value - a.pick_value);
 
             let picksToInclude = [];
@@ -404,11 +398,11 @@ export const findDeals = async (req, res) => {
               if (picksToInclude.length >= 2) break;
             }
 
-            if (pickTotal >= gap * 0.6) {
-              const rawPickTotal = picksToInclude.reduce((s, p) => s + p.raw_pick_value, 0);
+            const discountedPickTotal = applyConsolidationDiscount(pickTotal, picksToInclude.length);
+            if (discountedPickTotal >= gap * 0.6) {
               const fairness = computeFairness(
                 [], targetValue, 1 + picksToInclude.length,
-                [basePlayer.bfbValue ?? 0], rawPickTotal, 1,
+                [basePlayer.bfbValue ?? 0], pickTotal, 1,
               );
               deals.push({
                 target_team: { roster_id: team.roster_id, display_name: team.display_name },
@@ -463,25 +457,25 @@ export const findDeals = async (req, res) => {
           // 4. Picks-only swap: trade your pick for their picks
           if (teamPicks.length > 0) {
             const valuedTeamPicks = teamPicks
-              .map((p) => ({ ...p, pick_value: dealPickValue(p), raw_pick_value: rawPickValue(p) }))
-              .filter((p) => p.raw_pick_value < targetValue) // only accept lesser picks that combine to match
+              .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
+              .filter((p) => p.pick_value < targetValue) // only accept lesser picks that combine to match
               .sort((a, b) => b.pick_value - a.pick_value);
 
             let swapPicks = [];
             let swapTotal = 0;
-            let swapRawTotal = 0;
             for (const pick of valuedTeamPicks) {
               if (swapTotal >= targetValue * 0.9) break;
               swapPicks.push(pick);
               swapTotal += pick.pick_value;
-              swapRawTotal += pick.raw_pick_value;
               if (swapPicks.length >= 3) break;
             }
 
-            if (swapPicks.length >= 2 && swapTotal >= targetValue * 0.6) {
+            // Apply consolidation discount — trading up always costs more than raw sum
+            const discountedSwap = applyConsolidationDiscount(swapTotal, swapPicks.length);
+            if (swapPicks.length >= 2 && discountedSwap >= targetValue * 0.80) {
               const fairness = computeFairness(
                 [], targetValue, swapPicks.length,
-                [], swapRawTotal, 1,
+                [], swapTotal, 1,
               );
               deals.push({
                 target_team: { roster_id: team.roster_id, display_name: team.display_name },
@@ -563,7 +557,7 @@ export const findDeals = async (req, res) => {
           const basePlayer = playerPlusPick[0];
           const gap = targetValue - (basePlayer.bfbValue ?? 0);
           const valuedPicks = myPicks
-            .map((p) => ({ ...p, pick_value: dealPickValue(p), raw_pick_value: rawPickValue(p) }))
+            .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
             .sort((a, b) => b.pick_value - a.pick_value);
 
           let picksToInclude = [];
@@ -575,10 +569,10 @@ export const findDeals = async (req, res) => {
             if (picksToInclude.length >= 2) break;
           }
 
-          if (pickTotal >= gap * 0.6) {
-            const rawPickTotal = picksToInclude.reduce((s, p) => s + p.raw_pick_value, 0);
+          const discountedPickTotal = applyConsolidationDiscount(pickTotal, picksToInclude.length);
+          if (discountedPickTotal >= gap * 0.6) {
             const fairness = computeFairness(
-              [basePlayer.bfbValue ?? 0], rawPickTotal, 1,
+              [basePlayer.bfbValue ?? 0], pickTotal, 1,
               [], targetValue, 1 + picksToInclude.length,
             );
             deals.push({
@@ -631,24 +625,24 @@ export const findDeals = async (req, res) => {
         // 4. Picks-only: trade up by sending multiple of my picks (reuse myPicks from above)
         if (myPicks.length > 0) {
           const valuedMyPicks = myPicks
-            .map((p) => ({ ...p, pick_value: dealPickValue(p), raw_pick_value: rawPickValue(p) }))
-            .filter((p) => p.raw_pick_value < targetValue)
+            .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
+            .filter((p) => p.pick_value < targetValue)
             .sort((a, b) => b.pick_value - a.pick_value);
 
           let swapPicks = [];
           let swapTotal = 0;
-          let swapRawTotal = 0;
           for (const pick of valuedMyPicks) {
             if (swapTotal >= targetValue * 0.9) break;
             swapPicks.push(pick);
             swapTotal += pick.pick_value;
-            swapRawTotal += pick.raw_pick_value;
             if (swapPicks.length >= 3) break;
           }
 
-          if (swapPicks.length >= 2 && swapTotal >= targetValue * 0.6) {
+          // Apply consolidation discount — trading up always costs more than raw sum
+          const discountedSwap = applyConsolidationDiscount(swapTotal, swapPicks.length);
+          if (swapPicks.length >= 2 && discountedSwap >= targetValue * 0.80) {
             const fairness = computeFairness(
-              [], swapRawTotal, 1,
+              [], swapTotal, 1,
               [], targetValue, swapPicks.length,
             );
             deals.push({
@@ -774,7 +768,7 @@ export const findDeals = async (req, res) => {
           const gap = selectedValue - (basePlayer.bfbValue ?? 0);
 
           const valuedPicks = teamPicks
-            .map((p) => ({ ...p, pick_value: dealPickValue(p), raw_pick_value: rawPickValue(p) }))
+            .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
             .sort((a, b) => b.pick_value - a.pick_value);
 
           let picksToInclude = [];
@@ -786,11 +780,11 @@ export const findDeals = async (req, res) => {
             if (picksToInclude.length >= 2) break;
           }
 
-          if (pickTotal >= gap * 0.6) {
-            const rawPickTotal = picksToInclude.reduce((s, p) => s + p.raw_pick_value, 0);
+          const discountedPickTotal = applyConsolidationDiscount(pickTotal, picksToInclude.length);
+          if (discountedPickTotal >= gap * 0.6) {
             const fairness = computeFairness(
               [selectedValue], 0, 1 + picksToInclude.length,
-              [basePlayer.bfbValue ?? 0], rawPickTotal, 1,
+              [basePlayer.bfbValue ?? 0], pickTotal, 1,
             );
             deals.push({
               target_team: { roster_id: team.roster_id, display_name: team.display_name },
@@ -903,7 +897,7 @@ export const findDeals = async (req, res) => {
         const gap = selectedValue - (basePlayer.bfbValue ?? 0);
 
         const valuedPicks = myPicks
-          .map((p) => ({ ...p, pick_value: dealPickValue(p), raw_pick_value: rawPickValue(p) }))
+          .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
           .sort((a, b) => b.pick_value - a.pick_value);
 
         let picksToInclude = [];
@@ -915,10 +909,10 @@ export const findDeals = async (req, res) => {
           if (picksToInclude.length >= 2) break;
         }
 
-        if (pickTotal >= gap * 0.6) {
-          const rawPickTotal = picksToInclude.reduce((s, p) => s + p.raw_pick_value, 0);
+        const discountedPickTotal = applyConsolidationDiscount(pickTotal, picksToInclude.length);
+        if (discountedPickTotal >= gap * 0.6) {
           const fairness = computeFairness(
-            [basePlayer.bfbValue ?? 0], rawPickTotal, 1,
+            [basePlayer.bfbValue ?? 0], pickTotal, 1,
             [selectedValue], 0, 1 + picksToInclude.length,
           );
           deals.push({
@@ -1028,12 +1022,72 @@ function formatPick(pick, rosterToSlot) {
   };
 }
 
+/**
+ * Select picks to bridge a value gap, preferring "1 anchor pick + change back" over "2 mediocre picks".
+ *
+ * @param {Object[]} availablePicks - picks available to send (sorted desc by pick_value)
+ * @param {number} gap - value gap to bridge
+ * @param {Object[]} otherSideLatePicks - late-round picks from the other side (for "change back")
+ * @param {Set} [usedPickKeys] - picks already committed in other deals
+ * @returns {{ givePicks, receivePicks }} - picks to send and receive (change back)
+ */
+function selectPickPackage(availablePicks, gap, otherSideLatePicks = [], usedPickKeys = new Set()) {
+  const available = availablePicks.filter(
+    (p) => !usedPickKeys.has(`${p.round}-${p.season}-${p.original_roster_id}`),
+  );
+
+  // Strategy 1: Single anchor pick (80%-130% of gap)
+  const anchor = available.find((p) => p.pick_value >= gap * 0.8 && p.pick_value <= gap * 1.3);
+  if (anchor) {
+    return { givePicks: [anchor], receivePicks: [] };
+  }
+
+  // Strategy 2: Single pick that overshoots — get a late-round pick back as change
+  const overshooter = available.find((p) => p.pick_value > gap * 1.3 && p.pick_value <= gap * 2.5);
+  if (overshooter && otherSideLatePicks.length > 0) {
+    const overshoot = overshooter.pick_value - gap;
+    const changePick = otherSideLatePicks.find(
+      (p) => p.pick_value >= overshoot * 0.4 && p.pick_value <= overshoot * 1.5,
+    );
+    if (changePick) {
+      return { givePicks: [overshooter], receivePicks: [changePick] };
+    }
+  }
+
+  // Strategy 3: Fallback — greedy fill with consolidation penalty
+  let picksToInclude = [];
+  let pickTotal = 0;
+  for (const pick of available) {
+    if (pickTotal >= gap * 1.1) break;
+    picksToInclude.push(pick);
+    pickTotal += pick.pick_value;
+    if (picksToInclude.length >= 2) break;
+  }
+
+  const discounted = applyConsolidationDiscount(pickTotal, picksToInclude.length);
+  if (picksToInclude.length > 0 && discounted >= gap * 0.6) {
+    return { givePicks: picksToInclude, receivePicks: [] };
+  }
+
+  return { givePicks: [], receivePicks: [] };
+}
+
 function computeFairness(aValues, aPickVal, bAssetCount, bValues, bPickVal, aAssetCount) {
   const globalMax = Math.max(...aValues, aPickVal, ...bValues, bPickVal, 1);
   const aSide = calculateTradeValue(aValues, aPickVal, bAssetCount, globalMax);
   const bSide = calculateTradeValue(bValues, bPickVal, aAssetCount, globalMax);
   const total = aSide.total + bSide.total || 1;
   return Math.round((aSide.total / total) * 100);
+}
+
+// Raw fairness: straight sum comparison without elite curve or package tax.
+// Used for recommended trade filtering where the curved metric is misleading
+// (multi-asset sides always look cheaper due to non-linear scaling + tax).
+function computeRawFairness(aValues, aPickVal, bValues, bPickVal) {
+  const aTotal = aValues.reduce((s, v) => s + v, 0) + aPickVal;
+  const bTotal = bValues.reduce((s, v) => s + v, 0) + bPickVal;
+  const total = aTotal + bTotal || 1;
+  return Math.round((aTotal / total) * 100);
 }
 
 export const getTradeTargets = async (req, res) => {
@@ -1141,12 +1195,9 @@ export const getRecommendedTrades = async (req, res) => {
       getDraftPicksByLeague(league_id),
     ]);
 
-    // Undiscounted pick value (matches trade calculator)
+    // Pick value using the perceived-value curve
     const rawPickValue = (pick) =>
       getPickValue(pick.round, rosterToSlot[pick.original_roster_id] ?? 6, pick.season > year ? 1 : 0);
-
-    const dealPickValue = (pick) =>
-      Math.round(rawPickValue(pick) * KEEPER_PICK_DISCOUNT);
 
     // ── Category 1: Upgrades ──
     // For each position in my top 8, find better players on other teams
@@ -1157,8 +1208,11 @@ export const getRecommendedTrades = async (req, res) => {
     // Only include rounds 1-3 for upgrades — rounds 4+ are junk filler, not trade pieces
     const myTradePicks = myPicks
       .filter((p) => p.round <= 3)
-      .map((p) => ({ ...p, pick_value: dealPickValue(p), raw_pick_value: rawPickValue(p) }))
+      .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
       .sort((a, b) => b.pick_value - a.pick_value);
+
+    // Build a set of pick keys already used across upgrade deals
+    const usedUpgradePickKeys = new Set();
 
     for (const myPlayer of myTop8) {
       const pos = myPlayer.position;
@@ -1176,36 +1230,40 @@ export const getRecommendedTrades = async (req, res) => {
           const targetVal = target.bfbValue ?? 0;
           const gap = targetVal - myVal;
 
-          // Upgrades always cost player + picks — the user expects to "overpay"
-          // so the other team has incentive to trade their better player
-          let picksToInclude = [];
-          let pickTotal = 0;
-          for (const pick of myTradePicks) {
-            // Don't reuse picks already committed in another upgrade deal
-            if (upgrades.some((d) => d.give.picks.some((gp) => gp.round === pick.round && gp.season === pick.season && gp.original_roster_id === pick.original_roster_id))) continue;
-            // Skip combos of only round 4-5 picks — consolidate to a single 3rd instead
-            if (pickTotal >= gap * 1.1) break;
-            picksToInclude.push(pick);
-            pickTotal += pick.pick_value;
-            if (picksToInclude.length >= 2) break;
-          }
+          // Other team's late picks available as "change back"
+          const theirLatePicks = draftPicks
+            .filter((p) => p.current_roster_id === team.roster_id && p.round >= 3)
+            .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
+            .sort((a, b) => a.pick_value - b.pick_value);
 
-          if (picksToInclude.length > 0 && pickTotal >= gap * 0.4) {
-            const rawPickTotal = picksToInclude.reduce((s, p) => s + p.raw_pick_value, 0);
+          const { givePicks, receivePicks } = selectPickPackage(
+            myTradePicks, gap, theirLatePicks, usedUpgradePickKeys,
+          );
+
+          if (givePicks.length > 0) {
+            const givePickTotal = givePicks.reduce((s, p) => s + p.pick_value, 0);
+            const receivePickTotal = receivePicks.reduce((s, p) => s + p.pick_value, 0);
             const fairness = computeFairness(
-              [myVal], rawPickTotal, 1,
-              [targetVal], 0, 1 + picksToInclude.length,
+              [myVal], givePickTotal, 1 + receivePicks.length,
+              [targetVal], receivePickTotal, 1 + givePicks.length,
             );
+            const rawFairness = computeRawFairness(
+              [myVal], givePickTotal, [targetVal], receivePickTotal,
+            );
+            for (const p of givePicks) usedUpgradePickKeys.add(`${p.round}-${p.season}-${p.original_roster_id}`);
             upgrades.push({
               target_team: { roster_id: team.roster_id, display_name: team.display_name },
               type: "player_plus_picks",
               give: {
                 players: [formatPlayer(myPlayer)],
-                picks: picksToInclude.map((p) => formatPick(p, rosterToSlot)),
+                picks: givePicks.map((p) => formatPick(p, rosterToSlot)),
               },
-              receive: { players: [formatPlayer(target)], picks: [] },
-              fairness,
-              rationale: `Upgrade ${pos}: ${myPlayer.full_name} + picks → ${target.full_name}`,
+              receive: {
+                players: [formatPlayer(target)],
+                picks: receivePicks.map((p) => formatPick(p, rosterToSlot)),
+              },
+              fairness: rawFairness,
+              rationale: `Upgrade ${pos}: ${myPlayer.full_name} + picks → ${target.full_name}${receivePicks.length > 0 ? " + Rd" + receivePicks[0].round : ""}`,
               category: "upgrade",
             });
           }
@@ -1248,9 +1306,8 @@ export const getRecommendedTrades = async (req, res) => {
 
             // If close in value, try 1-for-1
             if (gap <= targetVal * 0.25) {
-              const fairness = computeFairness(
-                [offerVal], 0, 1,
-                [targetVal], 0, 1,
+              const fairness = computeRawFairness(
+                [offerVal], 0, [targetVal], 0,
               );
               fillNeed.push({
                 target_team: { roster_id: team.roster_id, display_name: team.display_name },
@@ -1265,32 +1322,37 @@ export const getRecommendedTrades = async (req, res) => {
             }
 
             // Otherwise surplus player + picks to bridge the gap
-            let picksToInclude = [];
-            let pickTotal = 0;
-            for (const pick of myTradePicks) {
-              if (fillNeed.some((d) => d.give.picks.some((gp) => gp.round === pick.round && gp.season === pick.season && gp.original_roster_id === pick.original_roster_id))) continue;
-              if (pickTotal >= gap * 1.1) break;
-              picksToInclude.push(pick);
-              pickTotal += pick.pick_value;
-              if (picksToInclude.length >= 2) break;
-            }
+            const usedFillPickKeys = new Set(
+              fillNeed.flatMap((d) => (d.give.picks ?? []).map((gp) => `${gp.round}-${gp.season}-${gp.original_roster_id}`)),
+            );
+            const theirLatePicks = draftPicks
+              .filter((p) => p.current_roster_id === team.roster_id && p.round >= 3)
+              .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
+              .sort((a, b) => a.pick_value - b.pick_value);
 
-            if (picksToInclude.length > 0 && pickTotal >= gap * 0.4) {
-              const rawPickTotal = picksToInclude.reduce((s, p) => s + p.raw_pick_value, 0);
-              const fairness = computeFairness(
-                [offerVal], rawPickTotal, 1,
-                [targetVal], 0, 1 + picksToInclude.length,
+            const { givePicks, receivePicks } = selectPickPackage(
+              myTradePicks, gap, theirLatePicks, usedFillPickKeys,
+            );
+
+            if (givePicks.length > 0) {
+              const givePickTotal = givePicks.reduce((s, p) => s + p.pick_value, 0);
+              const receivePickTotal = receivePicks.reduce((s, p) => s + p.pick_value, 0);
+              const fairness = computeRawFairness(
+                [offerVal], givePickTotal, [targetVal], receivePickTotal,
               );
               fillNeed.push({
                 target_team: { roster_id: team.roster_id, display_name: team.display_name },
                 type: "player_plus_picks",
                 give: {
                   players: [formatPlayer(offer)],
-                  picks: picksToInclude.map((p) => formatPick(p, rosterToSlot)),
+                  picks: givePicks.map((p) => formatPick(p, rosterToSlot)),
                 },
-                receive: { players: [formatPlayer(target)], picks: [] },
+                receive: {
+                  players: [formatPlayer(target)],
+                  picks: receivePicks.map((p) => formatPick(p, rosterToSlot)),
+                },
                 fairness,
-                rationale: `Fill ${pos} need: ${offer.full_name} + picks → ${target.full_name}`,
+                rationale: `Fill ${pos} need: ${offer.full_name} + picks → ${target.full_name}${receivePicks.length > 0 ? " + Rd" + receivePicks[0].round : ""}`,
                 category: "fill_need",
               });
               break;
@@ -1307,34 +1369,39 @@ export const getRecommendedTrades = async (req, res) => {
 
           if (myLowerKeepers.length > 0) {
             const basePlayer = myLowerKeepers[0];
-            const gap = targetVal - (basePlayer.bfbValue ?? 0);
+            const fallbackGap = targetVal - (basePlayer.bfbValue ?? 0);
 
-            let picksToInclude = [];
-            let pickTotal = 0;
-            for (const pick of myTradePicks) {
-              if (fillNeed.some((d) => d.give.picks.some((gp) => gp.round === pick.round && gp.season === pick.season && gp.original_roster_id === pick.original_roster_id))) continue;
-              if (pickTotal >= gap * 1.1) break;
-              picksToInclude.push(pick);
-              pickTotal += pick.pick_value;
-              if (picksToInclude.length >= 2) break;
-            }
+            const usedFallbackKeys = new Set(
+              fillNeed.flatMap((d) => (d.give.picks ?? []).map((gp) => `${gp.round}-${gp.season}-${gp.original_roster_id}`)),
+            );
+            const theirLatePicksFb = draftPicks
+              .filter((p) => p.current_roster_id === team.roster_id && p.round >= 3)
+              .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
+              .sort((a, b) => a.pick_value - b.pick_value);
 
-            if (picksToInclude.length > 0 && pickTotal >= gap * 0.4) {
-              const rawPickTotal = picksToInclude.reduce((s, p) => s + p.raw_pick_value, 0);
-              const fairness = computeFairness(
-                [basePlayer.bfbValue ?? 0], rawPickTotal, 1,
-                [targetVal], 0, 1 + picksToInclude.length,
+            const { givePicks: fbGive, receivePicks: fbReceive } = selectPickPackage(
+              myTradePicks, fallbackGap, theirLatePicksFb, usedFallbackKeys,
+            );
+
+            if (fbGive.length > 0) {
+              const givePickTotal = fbGive.reduce((s, p) => s + p.pick_value, 0);
+              const receivePickTotal = fbReceive.reduce((s, p) => s + p.pick_value, 0);
+              const fairness = computeRawFairness(
+                [basePlayer.bfbValue ?? 0], givePickTotal, [targetVal], receivePickTotal,
               );
               fillNeed.push({
                 target_team: { roster_id: team.roster_id, display_name: team.display_name },
                 type: "player_plus_picks",
                 give: {
                   players: [formatPlayer(basePlayer)],
-                  picks: picksToInclude.map((p) => formatPick(p, rosterToSlot)),
+                  picks: fbGive.map((p) => formatPick(p, rosterToSlot)),
                 },
-                receive: { players: [formatPlayer(target)], picks: [] },
+                receive: {
+                  players: [formatPlayer(target)],
+                  picks: fbReceive.map((p) => formatPick(p, rosterToSlot)),
+                },
                 fairness,
-                rationale: `Fill ${pos} need: ${basePlayer.full_name} + picks → ${target.full_name}`,
+                rationale: `Fill ${pos} need: ${basePlayer.full_name} + picks → ${target.full_name}${fbReceive.length > 0 ? " + Rd" + fbReceive[0].round : ""}`,
                 category: "fill_need",
               });
               break;
@@ -1378,17 +1445,19 @@ export const getRecommendedTrades = async (req, res) => {
 
         if (teamAnchorPicks.length === 0) continue;
 
-        // Find the best single anchor pick closest to effectiveVal
-        const anchor = teamAnchorPicks.find((p) => p.pick_value >= effectiveVal * 0.5) || teamAnchorPicks[teamAnchorPicks.length - 1];
-        const anchorVal = anchor.pick_value;
+        // Use effectiveVal for everything — surplus players are non-keepers,
+        // so trade value = what the other team actually gains (player minus who they drop)
+        if (effectiveVal <= 0) continue;
 
-        let receivePicks = [anchor]; // seller receives exactly one pick (rounds 1-3)
-        let receiveTotal = anchorVal;
-        let givePicks = []; // seller may send back a late pick to balance
+        const anchor = teamAnchorPicks.find((p) => p.pick_value >= effectiveVal * 0.5)
+          || teamAnchorPicks[teamAnchorPicks.length - 1];
+
+        let receivePicks = [anchor];
+        let receiveTotal = anchor.pick_value;
+        let givePicks = [];
         let givePickTotal = 0;
 
         if (receiveTotal > effectiveVal * 1.3) {
-          // Anchor overshoots — seller sends back a late pick to compensate
           const myLatePicks = myPicks
             .filter((p) => p.round >= 4)
             .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
@@ -1403,9 +1472,9 @@ export const getRecommendedTrades = async (req, res) => {
         }
 
         if (receiveTotal >= effectiveVal * 0.5) {
-          const fairness = computeFairness(
-            [surplusVal], givePickTotal, receivePicks.length,
-            [], receiveTotal, 1 + givePicks.length,
+          // Fairness based on effectiveVal, not raw surplusVal
+          const fairness = computeRawFairness(
+            [effectiveVal], givePickTotal, [], receiveTotal,
           );
 
           sellSurplus.push({
@@ -1428,9 +1497,13 @@ export const getRecommendedTrades = async (req, res) => {
       }
     }
 
-    // Sort and limit each category
-    const sortByFairness = (deals) =>
-      deals.sort((a, b) => Math.abs(a.fairness - 50) - Math.abs(b.fairness - 50));
+    // Only recommend trades the other team would accept:
+    // fairness = raw % of value I'm sending. >=50 means I send at least even value.
+    // Cap at 65 to avoid recommending trades that are bad for the user.
+    const filterAndSort = (deals) =>
+      deals
+        .filter((d) => d.fairness >= 50 && d.fairness <= 65)
+        .sort((a, b) => a.fairness - b.fairness);
 
     // Deduplicate: max 1 deal per target team per category
     const dedup = (deals) => {
@@ -1443,12 +1516,14 @@ export const getRecommendedTrades = async (req, res) => {
       });
     };
 
-    // For sell_surplus, prefer teams that need the position
-    sellSurplus.sort((a, b) => {
+    // For sell_surplus, allow deals that highly favor the other team —
+    // these are non-keepers being dumped for picks, so accepting less value is fine.
+    const filteredSurplus = sellSurplus.filter((d) => d.fairness >= 50 && d.fairness <= 80);
+    filteredSurplus.sort((a, b) => {
       if (a._needsPos !== b._needsPos) return a._needsPos ? -1 : 1;
       return Math.abs(a.fairness - 50) - Math.abs(b.fairness - 50);
     });
-    sellSurplus.forEach((d) => delete d._needsPos);
+    filteredSurplus.forEach((d) => delete d._needsPos);
 
     const top8Value = myTop8.reduce((s, p) => s + (p.bfbValue ?? 0), 0);
 
@@ -1460,9 +1535,9 @@ export const getRecommendedTrades = async (req, res) => {
         surplus: myTeam.surplus.map(formatPlayer),
       },
       categories: {
-        upgrade: dedup(sortByFairness(upgrades)).slice(0, 4),
-        fill_need: dedup(sortByFairness(fillNeed)).slice(0, 4),
-        sell_surplus: dedup(sellSurplus).slice(0, 4),
+        upgrade: dedup(filterAndSort(upgrades)).slice(0, 4),
+        fill_need: dedup(filterAndSort(fillNeed)).slice(0, 4),
+        sell_surplus: dedup(filteredSurplus).slice(0, 4),
       },
     });
   } catch (error) {

@@ -15,7 +15,6 @@ Outputs:
     output/calibration_corrections.json — machine-readable correction factors
 """
 
-import requests
 import json
 import os
 import sys
@@ -35,15 +34,16 @@ from keeper_value_model import (
     calculate_fantasy_points,
     merge_bio_data,
     run_model_for_season,
-    POSITIONS,
 )
-from trade_calculator import PICK_BASE_VALUES, PICK_HIT_RATE, get_pick_value
+from trade_calculator import get_pick_value
+from league_config import POSITIONS
+from sleeper_api import (
+    get_league_info, get_all_players as get_all_players_cached,
+    get_transactions, get_league_chain,
+)
 
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "..", "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-SLEEPER_BASE = "https://api.sleeper.app/v1"
-PLAYERS_CACHE_PATH = os.path.join(OUTPUT_DIR, "sleeper_players_cache.json")
 
 # How many weeks to check per season (regular season + offseason)
 # Sleeper uses week 0 for offseason transactions
@@ -51,60 +51,6 @@ WEEKS_TO_CHECK = list(range(0, 19))
 
 
 # ── 1. SLEEPER API: TRADE HISTORY ─────────────────────────────────────────
-
-def get_league_info(league_id):
-    """Fetch league metadata (includes previous_league_id for chaining)."""
-    r = requests.get(f"{SLEEPER_BASE}/league/{league_id}")
-    r.raise_for_status()
-    return r.json()
-
-
-def get_league_chain(league_id):
-    """
-    Follow the previous_league_id chain to get all historical league IDs.
-    Returns list of (league_id, season) tuples, newest first.
-    """
-    chain = []
-    current_id = league_id
-    while current_id:
-        info = get_league_info(current_id)
-        season = int(info.get("season", 0))
-        chain.append((current_id, season))
-        current_id = info.get("previous_league_id")
-        # Sleeper uses "0" or null for no previous league
-        if current_id and str(current_id) != "0":
-            time.sleep(0.3)  # rate limit courtesy
-        else:
-            current_id = None
-    return chain
-
-
-def get_transactions(league_id, week):
-    """Fetch all transactions for a given league+week."""
-    r = requests.get(f"{SLEEPER_BASE}/league/{league_id}/transactions/{week}")
-    r.raise_for_status()
-    return r.json()
-
-
-def get_all_players_cached():
-    """
-    Fetch the full NFL player database from Sleeper, with 24h cache.
-    Returns dict keyed by player_id.
-    """
-    if os.path.exists(PLAYERS_CACHE_PATH):
-        age_hours = (time.time() - os.path.getmtime(PLAYERS_CACHE_PATH)) / 3600
-        if age_hours < 24:
-            with open(PLAYERS_CACHE_PATH) as f:
-                return json.load(f)
-
-    print("  Downloading Sleeper player database...")
-    r = requests.get(f"{SLEEPER_BASE}/players/nfl")
-    r.raise_for_status()
-    players = r.json()
-    with open(PLAYERS_CACHE_PATH, "w") as f:
-        json.dump(players, f)
-    return players
-
 
 def fetch_all_trades(league_id):
     """

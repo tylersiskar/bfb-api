@@ -2,14 +2,11 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import random
-import psycopg2
 from psycopg2 import extras
 import os
 import sys
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+from db import connect_db
 
 # Rotate user agents to reduce bot detection risk
 USER_AGENTS = [
@@ -20,19 +17,6 @@ USER_AGENTS = [
 ]
 
 MAX_RETRIES = 3
-
-
-def connect_db():
-    dbname = os.getenv("PG_DB")
-    user = os.getenv("PG_USER")
-    password = os.getenv("PG_PASSWORD")
-    host = os.getenv("PG_HOST")
-
-    if not all([dbname, user, password, host]):
-        missing = [k for k, v in {"PG_DB": dbname, "PG_USER": user, "PG_PASSWORD": password, "PG_HOST": host}.items() if not v]
-        raise RuntimeError(f"Missing database env vars: {', '.join(missing)}")
-
-    return psycopg2.connect(dbname=dbname, user=user, password=password, host=host)
 
 
 def insert_records(conn, records):

@@ -22,23 +22,18 @@ import numpy as np
 import json
 import sys
 import os
+from dataclasses import dataclass, field
 from itertools import combinations
+
+from league_config import (
+    KEEPER_SLOTS, ROSTER_SIZE, STARTERS as _BASE_STARTERS,
+    FLEX_ELIGIBLE,
+)
 
 # ── LEAGUE SETTINGS ─────────────────────────────────────────────────────────
 
-STARTING_SLOTS = {
-    "QB":   1,
-    "RB":   2,
-    "WR":   2,
-    "TE":   1,
-    "FLEX": 1,   # RB/WR/TE eligible
-    "K":    1,
-    "DEF":  1,
-}
-
-FLEX_ELIGIBLE = ["RB", "WR", "TE"]
-ROSTER_SIZE = 16
-KEEPER_SLOTS = 8
+# Extend shared starters with K/DEF for trade calculator lineup optimization
+STARTING_SLOTS = {**_BASE_STARTERS, "K": 1, "DEF": 1}
 
 # ── VALUE CONFIGURATION ────────────────────────────────────────────────────
 
@@ -91,51 +86,51 @@ def get_package_tax(asset_diff):
 
 
 # ── PICK VALUATION ──────────────────────────────────────────────────────────
-# Base pick values (current year) by round and slot tier.
-# Future picks depreciate at 80% per year out.
-# All picks are discounted by a hit-rate factor (picks bust more than expected).
+# Perceived-value curve: reflects market/trade value, not expected production.
+# Round 1 is deliberately flat (a "first rounder" carries prestige).
+# Sharp cliff between round 1 and 2 captures the psychological round premium.
+# Future picks depreciate at 80%/year.
 
-PICK_BASE_VALUES = {
-    1: {
-        "early": 8500,    # slots 1-4
-        "mid":   6000,    # slots 5-8
-        "late":  4000,    # slots 9-12
-    },
-    2: {
-        "early": 2500,
-        "mid":   1500,
-        "late":  1000,
-    },
-    3: {
-        "early": 800,
-        "mid":   600,
-        "late":  400,
-    },
-}
+PICK_FUTURE_DEPRECIATION = 0.80
 
-PICK_HIT_RATE = 0.70          # picks are worth ~70% of "perfect draft" value
-PICK_FUTURE_DEPRECIATION = 0.80  # 80% per year into the future
+LEAGUE_SIZE = 12
+
+# Per-slot values for rounds 1-3 (index 0 = slot 1). Mirrors calculations.js.
+# Scaled below elite player values — keeper league draft pool is ~97th+ best.
+ROUND_1_VALUES = [5500, 5200, 4900, 4600, 4250, 3900, 3600, 3300, 3100, 2900, 2750, 2600]
+ROUND_2_VALUES = [1800, 1650, 1500, 1400, 1300, 1150, 1000, 850, 725, 650, 575, 500]
+ROUND_3_VALUES = [450, 425, 400, 385, 370, 350, 325, 300, 280, 265, 255, 250]
+
+PICK_ROUND_VALUES = {1: ROUND_1_VALUES, 2: ROUND_2_VALUES, 3: ROUND_3_VALUES}
+
+LATE_ROUND_VALUES = {4: 200, 5: 150, 6: 100, 7: 75, 8: 50}
+
+# Consolidation discount: multiple picks combined to match one are worth less.
+CONSOLIDATION_DISCOUNT = {1: 1.0, 2: 0.85, 3: 0.70}
 
 
 def get_pick_value(round_num, slot, years_out=0):
     """
-    Calculate a draft pick's trade value.
-    Accounts for round, slot tier, hit-rate discount, and future depreciation.
+    Calculate a draft pick's perceived trade value.
+    Uses per-slot lookup for rounds 1-3, flat values for 4-8.
     """
-    round_vals = PICK_BASE_VALUES.get(round_num)
-    if not round_vals:
-        return 200  # late-round dart throw
+    clamped_slot = max(1, min(slot, LEAGUE_SIZE))
+    round_vals = PICK_ROUND_VALUES.get(round_num)
 
-    if slot <= 4:
-        tier = "early"
-    elif slot <= 8:
-        tier = "mid"
+    if round_vals:
+        base = round_vals[clamped_slot - 1]
     else:
-        tier = "late"
+        base = LATE_ROUND_VALUES.get(round_num, 50)
 
-    base = round_vals.get(tier, 400)
-    value = base * PICK_HIT_RATE * (PICK_FUTURE_DEPRECIATION ** years_out)
-    return round(value)
+    return round(base * (PICK_FUTURE_DEPRECIATION ** years_out))
+
+
+def apply_consolidation_discount(total_pick_value, pick_count):
+    """Discount combined pick value when trading up (multiple picks for one)."""
+    if pick_count <= 1:
+        return total_pick_value
+    factor = CONSOLIDATION_DISCOUNT.get(min(pick_count, 3), 0.70)
+    return round(total_pick_value * factor)
 
 
 # ── CORE: TRADE VALUE ENGINE ───────────────────────────────────────────────
@@ -317,21 +312,28 @@ class TradeCalculator:
         b_start_after, _, b_pts_after = self.optimize_lineup(b_after)
 
         # ── Calculate trade values for pieces exchanged
+        a_index = self._roster_lookup(team_a_roster)
+        b_index = self._roster_lookup(team_b_roster)
+
         a_player_values = []
         for n in a_gives:
-            pos = self._find_position(n, team_a_roster)
-            bfb = self._find_bfb_value(n, team_a_roster)
-            wavg = self._find_weekly_avg(n, team_a_roster)
-            pv = self.get_player_value(n, pos, bfb_value=bfb, weekly_avg_override=wavg)
+            p = a_index.get(n, {})
+            pv = self.get_player_value(
+                n, p.get("position"),
+                bfb_value=p.get("bfb_value") or p.get("bfbValue"),
+                weekly_avg_override=p.get("weekly_avg"),
+            )
             if pv:
                 a_player_values.append(pv)
 
         b_player_values = []
         for n in b_gives:
-            pos = self._find_position(n, team_b_roster)
-            bfb = self._find_bfb_value(n, team_b_roster)
-            wavg = self._find_weekly_avg(n, team_b_roster)
-            pv = self.get_player_value(n, pos, bfb_value=bfb, weekly_avg_override=wavg)
+            p = b_index.get(n, {})
+            pv = self.get_player_value(
+                n, p.get("position"),
+                bfb_value=p.get("bfb_value") or p.get("bfbValue"),
+                weekly_avg_override=p.get("weekly_avg"),
+            )
             if pv:
                 b_player_values.append(pv)
 
@@ -420,26 +422,14 @@ class TradeCalculator:
         values.sort(reverse=True)
         return sum(values[:KEEPER_SLOTS])
 
-    def _find_position(self, player_name, roster):
-        """Find a player's position from a roster list."""
-        for p in roster:
-            if p["player_name"] == player_name:
-                return p.get("position")
-        return None
+    @staticmethod
+    def _roster_lookup(roster):
+        """Build a {player_name: player_dict} index from a roster list."""
+        return {p["player_name"]: p for p in roster}
 
-    def _find_bfb_value(self, player_name, roster):
-        """Find a player's bfbValue from a roster list (passed from API)."""
-        for p in roster:
-            if p["player_name"] == player_name:
-                return p.get("bfb_value") or p.get("bfbValue")
-        return None
-
-    def _find_weekly_avg(self, player_name, roster):
-        """Find a player's weekly_avg from a roster list."""
-        for p in roster:
-            if p["player_name"] == player_name:
-                return p.get("weekly_avg")
-        return None
+    def _find_player(self, player_name, roster_index):
+        """Find a player dict from a pre-built roster index."""
+        return roster_index.get(player_name)
 
     def _lookup_player(self, player_name):
         """Look up a player in the keeper values dataframe."""
@@ -564,13 +554,39 @@ class TradeCalculator:
 
 # ── TRADE RESULT ────────────────────────────────────────────────────────────
 
+@dataclass
 class TradeResult:
     """Container for trade evaluation results."""
 
-    def __init__(self, **kwargs):
-        for k, v in kwargs.items():
-            setattr(self, k, v)
-        self.mutual_benefit = getattr(self, "mutual_benefit", 0)
+    team_a_name: str
+    team_b_name: str
+    a_gives: list
+    b_gives: list
+    a_giving_value: float
+    b_giving_value: float
+    a_raw_value: float
+    b_raw_value: float
+    a_pick_value: float
+    b_pick_value: float
+    package_tax_rate: float
+    package_tax_side: str
+    a_player_details: list
+    b_player_details: list
+    a_lineup_before: float
+    a_lineup_after: float
+    b_lineup_before: float
+    b_lineup_after: float
+    a_lineup_delta: float
+    b_lineup_delta: float
+    a_keeper_before: float
+    a_keeper_after: float
+    b_keeper_before: float
+    b_keeper_after: float
+    a_starters_before: list = field(default_factory=list)
+    a_starters_after: list = field(default_factory=list)
+    b_starters_before: list = field(default_factory=list)
+    b_starters_after: list = field(default_factory=list)
+    mutual_benefit: float = 0
 
     @property
     def verdict(self):
@@ -629,13 +645,13 @@ class TradeResult:
             "win_now_verdict": self.win_now_verdict,
             "dynasty_verdict": self.dynasty_verdict,
             "fairness_pct": self.fairness_pct,
-            "package_tax_rate": getattr(self, "package_tax_rate", 0),
-            "package_tax_side": getattr(self, "package_tax_side", "none"),
+            "package_tax_rate": self.package_tax_rate,
+            "package_tax_side": self.package_tax_side,
             "side_a": {
                 "giving_value": self.a_giving_value,
-                "raw_value": getattr(self, "a_raw_value", self.a_giving_value),
-                "pick_value": getattr(self, "a_pick_value", 0),
-                "player_details": getattr(self, "a_player_details", []),
+                "raw_value": self.a_raw_value,
+                "pick_value": self.a_pick_value,
+                "player_details": self.a_player_details,
                 "lineup_before": self.a_lineup_before,
                 "lineup_after": self.a_lineup_after,
                 "lineup_delta": self.a_lineup_delta,
@@ -654,9 +670,9 @@ class TradeResult:
             },
             "side_b": {
                 "giving_value": self.b_giving_value,
-                "raw_value": getattr(self, "b_raw_value", self.b_giving_value),
-                "pick_value": getattr(self, "b_pick_value", 0),
-                "player_details": getattr(self, "b_player_details", []),
+                "raw_value": self.b_raw_value,
+                "pick_value": self.b_pick_value,
+                "player_details": self.b_player_details,
                 "lineup_before": self.b_lineup_before,
                 "lineup_after": self.b_lineup_after,
                 "lineup_delta": self.b_lineup_delta,
@@ -693,8 +709,8 @@ class TradeResult:
         print(f"  {self.team_a_name} gives: {self.a_giving_value:.1f}")
         print(f"  {self.team_b_name} gives: {self.b_giving_value:.1f}")
 
-        tax_rate = getattr(self, "package_tax_rate", 0)
-        tax_side = getattr(self, "package_tax_side", "none")
+        tax_rate = self.package_tax_rate
+        tax_side = self.package_tax_side
         if tax_rate > 0:
             taxed_name = self.team_a_name if tax_side == "a" else self.team_b_name
             print(f"  Package tax: -{tax_rate*100:.0f}% applied to {taxed_name} (sending more assets)")
@@ -851,7 +867,7 @@ def main():
     print(f"  Elite exponent: {ELITE_EXPONENT}")
     print(f"  Keeper weight in trades: {KEEPER_WEIGHT_IN_TRADE}")
     print(f"  Package tax: {PACKAGE_TAX}")
-    print(f"  Pick hit rate: {PICK_HIT_RATE}")
+    print(f"  Pick consolidation discount: {CONSOLIDATION_DISCOUNT}")
     print(f"  Starting lineup: {STARTING_SLOTS}")
 
     calc = TradeCalculator()

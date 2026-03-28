@@ -11,91 +11,14 @@ Usage:
     https://sleeper.com/leagues/<LEAGUE_ID>
 """
 
-import requests
-import json
 import sys
 import os
 import pandas as pd
 
-SLEEPER_BASE = "https://api.sleeper.app/v1"
-
-
-def get_league_info(league_id):
-    """Fetch league metadata."""
-    r = requests.get(f"{SLEEPER_BASE}/league/{league_id}")
-    r.raise_for_status()
-    return r.json()
-
-
-def get_league_users(league_id):
-    """Fetch all users in the league."""
-    r = requests.get(f"{SLEEPER_BASE}/league/{league_id}/users")
-    r.raise_for_status()
-    return r.json()
-
-
-def get_league_rosters(league_id):
-    """Fetch all rosters in the league."""
-    r = requests.get(f"{SLEEPER_BASE}/league/{league_id}/rosters")
-    r.raise_for_status()
-    return r.json()
-
-
-def get_all_players():
-    """
-    Fetch the full NFL player database from Sleeper.
-    This is a large response (~20MB) — cache it locally.
-    """
-    cache_path = "output/sleeper_players_cache.json"
-
-    if os.path.exists(cache_path):
-        mod_time = os.path.getmtime(cache_path)
-        import time
-        age_hours = (time.time() - mod_time) / 3600
-        if age_hours < 24:
-            print("  Using cached player database...")
-            with open(cache_path) as f:
-                return json.load(f)
-
-    print("  Downloading full player database (this may take a moment)...")
-    r = requests.get(f"{SLEEPER_BASE}/players/nfl")
-    r.raise_for_status()
-    players = r.json()
-
-    os.makedirs("output", exist_ok=True)
-    with open(cache_path, "w") as f:
-        json.dump(players, f)
-
-    return players
-
-
-def get_player_stats(season, week=None):
-    """
-    Fetch player stats for a season.
-    If week is None, returns full-season stats.
-    """
-    if week:
-        url = f"{SLEEPER_BASE}/stats/nfl/regular/{season}/{week}"
-    else:
-        url = f"{SLEEPER_BASE}/stats/nfl/regular/{season}"
-    r = requests.get(url)
-    r.raise_for_status()
-    return r.json()
-
-
-def get_player_projections(season, week=None):
-    """
-    Fetch player projections for a season.
-    If week is None, returns full-season projections.
-    """
-    if week:
-        url = f"{SLEEPER_BASE}/projections/nfl/regular/{season}/{week}"
-    else:
-        url = f"{SLEEPER_BASE}/projections/nfl/regular/{season}"
-    r = requests.get(url)
-    if r.status_code == 200:
-        return r.json()
-    return {}
+from sleeper_api import (
+    get_league_info, get_league_users, get_league_rosters,
+    get_all_players, get_player_stats, get_player_projections,
+)
 
 
 def build_roster_dataframe(league_id):

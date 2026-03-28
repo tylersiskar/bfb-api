@@ -3,35 +3,22 @@
 Generate BFB Weekly Trade Report from keeper_values.csv and PostgreSQL roster data.
 """
 import csv
+import re
 import os
 import sys
 from datetime import datetime
 from collections import defaultdict
 
-import psycopg2
-
-# ── Config ──
-LEAGUE_ID = os.environ.get("LEAGUE_ID", "1312089696964202496")
-KEEPERS_PER_TEAM = 8
-NUM_TEAMS = 12
-KEEPER_VALUE_THRESHOLD = 0.178  # minimum KV to be considered keeper-worthy
-
-DB_CONFIG = {
-    "dbname": os.environ.get("PG_DB", "bfb"),
-    "user": os.environ.get("PG_USER", "postgres"),
-    "password": os.environ.get("PG_PASSWORD", ""),
-    "host": os.environ.get("PG_HOST", "localhost"),
-    "port": 5432,
-}
+from db import connect_db
+from league_config import (
+    LEAGUE_ID, KEEPER_SLOTS as KEEPERS_PER_TEAM, NUM_TEAMS,
+    KEEPER_VALUE_THRESHOLD, STARTERS, FLEX_ELIGIBLE as FLEX_POSITIONS,
+)
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "..", "output")
 CSV_PATH = os.path.join(OUTPUT_DIR, "keeper_values.csv")
 REPORT_PATH = os.path.join(OUTPUT_DIR, "trade_report.txt")
-
-# Positional starter slots (standard 12-team league)
-STARTERS = {"QB": 1, "RB": 2, "WR": 2, "TE": 1}
-FLEX_POSITIONS = {"RB", "WR", "TE"}
 
 
 def load_keeper_values():
@@ -52,7 +39,7 @@ def load_keeper_values():
 
 
 def load_rosters():
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = connect_db()
     cur = conn.cursor()
 
     # Get rosters with owner info
@@ -107,7 +94,6 @@ def generate_report():
 
     # Build lookup by name, including normalized versions without suffixes
     # (e.g. "Brian Thomas Jr." -> also match "Brian Thomas")
-    import re
     kv_by_name = {p["name"]: p for p in all_players}
     SUFFIXES = re.compile(r'\s+(Jr\.?|Sr\.?|III|II|IV|V)$', re.IGNORECASE)
     for p in all_players:
@@ -185,22 +171,22 @@ def generate_report():
     w("KEEPER VALUE THRESHOLDS")
     w("-" * 80)
     cutoff = keeper_pool[-1] if keeper_pool else None
-    # Dynamic tiers: split keeper pool into quartiles
-    q_size = keeper_pool_size // 4
-    t1 = keeper_pool[:q_size] if q_size > 0 else []
-    t2 = keeper_pool[q_size:q_size*2] if q_size > 0 else []
-    t3 = keeper_pool[q_size*2:q_size*3] if q_size > 0 else []
-    t4 = keeper_pool[q_size*3:] if q_size > 0 else []
+    # Use tiers already assigned by assign_tiers()
+    tier_groups = {}
+    for p in keeper_pool:
+        t = p["tier"]
+        tier_groups.setdefault(t, []).append(p)
     if cutoff:
         w(f"  Keeper-worthy cutoff: {cutoff['name']} ({cutoff['position']}) = {cutoff['keeper_value']:.3f}")
-    if t1:
-        w(f"  Tier 1 (Elite, top {len(t1)}):     {t1[0]['keeper_value']:.3f} - {t1[-1]['keeper_value']:.3f}")
-    if t2:
-        w(f"  Tier 2 (Strong, {len(t1)+1}-{len(t1)+len(t2)}):    {t2[0]['keeper_value']:.3f} - {t2[-1]['keeper_value']:.3f}")
-    if t3:
-        w(f"  Tier 3 (Solid, {len(t1)+len(t2)+1}-{len(t1)+len(t2)+len(t3)}):     {t3[0]['keeper_value']:.3f} - {t3[-1]['keeper_value']:.3f}")
-    if t4:
-        w(f"  Tier 4 (Fringe, {len(t1)+len(t2)+len(t3)+1}-{keeper_pool_size}):    {t4[0]['keeper_value']:.3f} - {t4[-1]['keeper_value']:.3f}")
+    tier_labels = {1: "Elite", 2: "Strong", 3: "Solid", 4: "Fringe"}
+    running_count = 0
+    for tier_num in sorted(tier_groups):
+        group = tier_groups[tier_num]
+        start = running_count + 1
+        end = running_count + len(group)
+        label = tier_labels.get(tier_num, f"Tier {tier_num}")
+        w(f"  Tier {tier_num} ({label}, {start}-{end}):     {group[0]['keeper_value']:.3f} - {group[-1]['keeper_value']:.3f}")
+        running_count = end
 
     # Team-by-team
     w("")
