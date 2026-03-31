@@ -1184,12 +1184,6 @@ export const getRecommendedTrades = async (req, res) => {
 
     const myTeam = teams.find((t) => t.roster_id === parseInt(roster_id));
 
-    // Replacement cost: value of the 97th player (first player outside keeper pool).
-    // When a team acquires a surplus player, they must drop someone — this is that cost.
-    const sorted = [...withValues].sort((a, b) => (b.bfbValue ?? 0) - (a.bfbValue ?? 0));
-    const replacementCost = sorted[96]?.bfbValue ?? 0;
-
-
     // 4. Pick slot map + draft picks
     const [{ rosterToSlot }, draftPicks] = await Promise.all([
       getPickSlotMap(league_id),
@@ -1418,10 +1412,6 @@ export const getRecommendedTrades = async (req, res) => {
 
     for (const surplusPlayer of myTeam.surplus) {
       const surplusVal = surplusPlayer.bfbValue ?? 0;
-      // Effective trade value: surplus players are sold as keepers (not waiver fodder),
-      // so discount against avg 9th keeper value rather than full replacement cost.
-      // This reflects what the seller actually loses — a 9th-keeper-quality asset.
-      const effectiveVal = Math.max(surplusVal - replacementCost, 0);
 
       for (const team of teams) {
         if (team.roster_id === parseInt(roster_id)) continue;
@@ -1437,21 +1427,22 @@ export const getRecommendedTrades = async (req, res) => {
           : 0;
         if (surplusVal <= teamFloor && team.keeperWorthy.length >= KEEPER_SLOTS) continue;
 
+        // effectiveVal = net gain for the buyer: player value minus who they'd drop.
+        // Per-team floor rather than a global baseline so each team's situation is
+        // evaluated on its own merits.
+        const effectiveVal = Math.max(surplusVal - teamFloor, 0);
+        if (effectiveVal <= 0) continue;
+
         const teamPicks = draftPicks.filter((p) => p.current_roster_id === team.roster_id);
         if (teamPicks.length === 0) continue;
 
         // Anchor on a pick from the buyer — surplus deals can be rounds 1-5
-        // since these are lower-value keeper-quality players, not franchise assets
         const teamAnchorPicks = teamPicks
           .filter((p) => p.round <= 5)
           .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
           .sort((a, b) => a.pick_value - b.pick_value);
 
         if (teamAnchorPicks.length === 0) continue;
-
-        // Use effectiveVal for everything — surplus players are non-keepers,
-        // so trade value = what the other team actually gains (player minus who they drop)
-        if (effectiveVal <= 0) continue;
 
         const anchor = teamAnchorPicks.find((p) => p.pick_value >= effectiveVal * 0.5)
           || teamAnchorPicks[teamAnchorPicks.length - 1];
@@ -1520,9 +1511,10 @@ export const getRecommendedTrades = async (req, res) => {
       });
     };
 
-    // For sell_surplus, allow deals that highly favor the other team —
-    // these are non-keepers being dumped for picks, so accepting less value is fine.
-    const filteredSurplus = sellSurplus.filter((d) => d.fairness >= 50 && d.fairness <= 80);
+    // Surplus deals: no fairness range filter — the anchor pick check (>= effectiveVal * 0.5)
+    // already ensures the deal is in the right ballpark. Sort by proximity to 50 so the
+    // most even deals surface first (matching trade report behavior).
+    const filteredSurplus = [...sellSurplus];
     filteredSurplus.sort((a, b) => {
       if (a._needsPos !== b._needsPos) return a._needsPos ? -1 : 1;
       return Math.abs(a.fairness - 50) - Math.abs(b.fairness - 50);

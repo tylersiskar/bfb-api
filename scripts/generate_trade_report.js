@@ -46,7 +46,7 @@ function formatPlayer(p) {
   };
 }
 
-function buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers = {}) {
+function buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers = {}, surplusPoolIds = keeperWorthyIds) {
   return rosters.map((roster) => {
     const rosterPlayers = (roster.player_ids ?? [])
       .map((id) => playerMap[id])
@@ -67,14 +67,14 @@ function buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers =
       const keeperIdSet = new Set(keeperWorthy.map((p) => p.id));
       const worstKeeperVal = keeperWorthy[keeperWorthy.length - 1]?.bfbValue ?? 0;
       surplus = rosterPlayers
-        .filter((p) => !keeperIdSet.has(p.id) && keeperWorthyIds.has(p.id) && (p.bfbValue ?? 0) < worstKeeperVal * 0.95);
+        .filter((p) => !keeperIdSet.has(p.id) && surplusPoolIds.has(p.id) && (p.bfbValue ?? 0) < worstKeeperVal * 0.95);
     } else {
       const allKW = rosterPlayers.filter((p) => keeperWorthyIds.has(p.id));
       keeperWorthy = allKW.slice(0, KEEPER_SLOTS);
       const projIds = new Set(keeperWorthy.map((p) => p.id));
       const worstKeeperVal = keeperWorthy[keeperWorthy.length - 1]?.bfbValue ?? 0;
       surplus = rosterPlayers
-        .filter((p) => !projIds.has(p.id) && keeperWorthyIds.has(p.id) && (p.bfbValue ?? 0) < worstKeeperVal * 0.95);
+        .filter((p) => !projIds.has(p.id) && surplusPoolIds.has(p.id) && (p.bfbValue ?? 0) < worstKeeperVal * 0.95);
     }
 
     const byPos = {};
@@ -126,11 +126,9 @@ export async function generateTradeReport() {
   const { withValues, playerMap } = enrichPlayers(players);
 
   const sleeperKeepers = await fetchSleeperKeepers(LEAGUE_ID);
-  const keeperWorthyIds = getKeeperWorthyIds(withValues);
-  const teams = buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers);
-
-  const sorted = [...withValues].sort((a, b) => (b.bfbValue ?? 0) - (a.bfbValue ?? 0));
-  const replacementCost = sorted[96]?.bfbValue ?? 0;
+  const keeperWorthyIds = getKeeperWorthyIds(withValues);          // top 96 — keeper eligibility
+  const surplusPoolIds = getKeeperWorthyIds(withValues, 120);      // top 120 — surplus candidates
+  const teams = buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers, surplusPoolIds);
 
   const [{ rosterToSlot }, draftPicks] = await Promise.all([
     getPickSlotMap(LEAGUE_ID),
@@ -252,7 +250,6 @@ export async function generateTradeReport() {
     // ── Sell Surplus ──
     for (const surplusPlayer of myTeam.surplus) {
       const surplusVal = surplusPlayer.bfbValue ?? 0;
-      const effectiveVal = Math.max(surplusVal - replacementCost, 0);
 
       for (const team of teams) {
         if (team.roster_id === rosterId) continue;
@@ -266,6 +263,12 @@ export async function generateTradeReport() {
           : 0;
         if (surplusVal <= teamFloor && team.keeperWorthy.length >= KEEPER_SLOTS) continue;
 
+        // effectiveVal = net gain for the buyer: player value minus who they'd have to drop.
+        // Using the target team's floor (their current 8th keeper) rather than a global baseline
+        // so each team's situation is evaluated on its own merits.
+        const effectiveVal = Math.max(surplusVal - teamFloor, 0);
+        if (effectiveVal <= 0) continue;
+
         const teamPicks = draftPicks.filter((p) => p.current_roster_id === team.roster_id);
         const teamAnchorPicks = teamPicks
           .filter((p) => p.round <= 3)
@@ -273,8 +276,6 @@ export async function generateTradeReport() {
           .sort((a, b) => a.pick_value - b.pick_value);
 
         if (teamAnchorPicks.length === 0) continue;
-
-        if (effectiveVal <= 0) continue;
 
         const anchor = teamAnchorPicks.find((p) => p.pick_value >= effectiveVal * 0.5)
           || teamAnchorPicks[teamAnchorPicks.length - 1];
@@ -329,14 +330,14 @@ export async function generateTradeReport() {
     if (topUpgrades.length >= 4) break;
   }
 
-  // Dedup surplus: no repeated players
-  const usedPlayers = new Set();
+  // Dedup surplus: best deal per selling team (shows breadth of who has surplus, not just best player)
+  const usedSellers = new Set();
   const topSurplus = [];
   for (const deal of allSurplus) {
-    if (usedPlayers.has(deal.give.player.id)) continue;
-    usedPlayers.add(deal.give.player.id);
+    if (usedSellers.has(deal.from)) continue;
+    usedSellers.add(deal.from);
     topSurplus.push(deal);
-    if (topSurplus.length >= 4) break;
+    if (topSurplus.length >= 5) break;
   }
 
   // 4. Format report

@@ -621,6 +621,22 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
             ppg = fp / max(gp, 1)
             weighted_fp = ppg * 17
 
+        # Declining veterans: cap weighted FP at current-season actual.
+        # Multi-season weighting smooths injury years, but for a genuinely
+        # aging player (trajectory < 0.85), prior seasons represent past
+        # production — not future upside. Allowing the weighted average to
+        # exceed current performance inflates players like 30yo RBs whose
+        # prior seasons were stronger than their current (declining) output.
+        if years_exp > 3 and weighted_fp is not None:
+            age_val = int(row.get("age", 27)) if pd.notna(row.get("age")) else 27
+            _curve = DEFAULT_AGING_CURVES.get(pos, {})
+            _cur_pct = _curve.get(age_val, 0.85)
+            _nxt_pct = _curve.get(age_val + 1, _cur_pct - 0.08)
+            _aging_traj = _nxt_pct / _cur_pct if _cur_pct > 0 else 1.0
+            if _aging_traj < 0.85:
+                current_season_fp = (fp / max(gp, 1)) * 17
+                weighted_fp = min(weighted_fp, current_season_fp)
+
         confidence = min(gp / MIN_GAMES, 1.0)
         qualified.append({"row": row, "pos": pos, "gp": gp, "full_season_fp": weighted_fp, "confidence": confidence, "name": name, "years_exp": years_exp})
 
@@ -713,8 +729,11 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
             # Floor: players near replacement but with prime years ahead
             # shouldn't get zero longevity. Their aging curve alone has value —
             # a 24yo RB with 4 elite years is worth more than a 30yo even if
-            # current VOR is marginal.
-            if longevity_score < 0.01 and elite_years >= 2:
+            # current VOR is marginal. Only apply for ascending/plateau players
+            # (trajectory >= 0.85) — declining veterans past their positional
+            # peak don't have prime years ahead and shouldn't get this boost.
+            aging_trajectory = prod_curve[1] if len(prod_curve) > 1 else 0.0
+            if longevity_score < 0.01 and elite_years >= 2 and aging_trajectory >= 0.85:
                 prime_floor = (elite_years / PROJECTION_YEARS) * 0.15
                 longevity_score = max(longevity_score, prime_floor)
         else:
