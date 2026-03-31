@@ -52,7 +52,7 @@ const LEAGUE_SIZE = 12;
 // Per-slot values for rounds 1-3 (slots 1-12). Index 0 = slot 1.
 // Scaled to sit below elite player values — in a keeper league the draft
 // pool is the ~97th+ best players, so picks shouldn't rival top assets.
-const ROUND_1_VALUES = [5500, 5200, 4900, 4600, 4250, 3900, 3600, 3300, 3100, 2900, 2750, 2600];
+const ROUND_1_VALUES = [6000, 5200, 5000, 4800, 4000, 3800, 3600, 3400, 3100, 2800, 2400, 2050];
 const ROUND_2_VALUES = [1800, 1650, 1500, 1400, 1300, 1150, 1000, 850, 725, 650, 575, 500];
 const ROUND_3_VALUES = [450, 425, 400, 385, 370, 350, 325, 300, 280, 265, 255, 250];
 
