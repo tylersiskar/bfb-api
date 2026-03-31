@@ -234,7 +234,7 @@ function buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers =
       const keeperIdSet = new Set(keeperWorthy.map((p) => p.id));
       const worstKeeperVal = keeperWorthy[keeperWorthy.length - 1]?.bfbValue ?? 0;
       surplus = rosterPlayers
-        .filter((p) => !keeperIdSet.has(p.id) && keeperWorthyIds.has(p.id) && (p.bfbValue ?? 0) < worstKeeperVal * 0.95);
+        .filter((p) => !keeperIdSet.has(p.id) && (p.bfbValue ?? 0) > 0 && (p.bfbValue ?? 0) < worstKeeperVal * 0.95);
     } else {
       // No keepers set — project top 8 by value, then check rest of roster
       const allKeeperWorthy = rosterPlayers.filter((p) => keeperWorthyIds.has(p.id));
@@ -242,7 +242,7 @@ function buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers =
       const projectedKeeperIds = new Set(keeperWorthy.map((p) => p.id));
       const worstKeeperVal = keeperWorthy[keeperWorthy.length - 1]?.bfbValue ?? 0;
       surplus = rosterPlayers
-        .filter((p) => !projectedKeeperIds.has(p.id) && keeperWorthyIds.has(p.id) && (p.bfbValue ?? 0) < worstKeeperVal * 0.95);
+        .filter((p) => !projectedKeeperIds.has(p.id) && (p.bfbValue ?? 0) > 0 && (p.bfbValue ?? 0) < worstKeeperVal * 0.95);
     }
 
     const byPos = {};
@@ -1189,6 +1189,15 @@ export const getRecommendedTrades = async (req, res) => {
     const sorted = [...withValues].sort((a, b) => (b.bfbValue ?? 0) - (a.bfbValue ?? 0));
     const replacementCost = sorted[96]?.bfbValue ?? 0;
 
+    // Average value of each team's 9th-best player — the "9th keeper slot value."
+    // Used as the baseline for surplus trade effective value: surplus players are being
+    // sold as keepers (not waiver pickups), so we discount against this market rate,
+    // not the full replacement cost (97th rostered player).
+    const avg9thKeeperValue = (() => {
+      const vals = teams.map((t) => t.players[8]?.bfbValue ?? 0).filter((v) => v > 0);
+      return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : 0;
+    })();
+
     // 4. Pick slot map + draft picks
     const [{ rosterToSlot }, draftPicks] = await Promise.all([
       getPickSlotMap(league_id),
@@ -1417,8 +1426,10 @@ export const getRecommendedTrades = async (req, res) => {
 
     for (const surplusPlayer of myTeam.surplus) {
       const surplusVal = surplusPlayer.bfbValue ?? 0;
-      // Effective trade value: acquiring team must drop someone to keep this player
-      const effectiveVal = Math.max(surplusVal - replacementCost, 0);
+      // Effective trade value: surplus players are sold as keepers (not waiver fodder),
+      // so discount against avg 9th keeper value rather than full replacement cost.
+      // This reflects what the seller actually loses — a 9th-keeper-quality asset.
+      const effectiveVal = Math.max(surplusVal - avg9thKeeperValue, 0);
 
       for (const team of teams) {
         if (team.roster_id === parseInt(roster_id)) continue;
@@ -1437,9 +1448,10 @@ export const getRecommendedTrades = async (req, res) => {
         const teamPicks = draftPicks.filter((p) => p.current_roster_id === team.roster_id);
         if (teamPicks.length === 0) continue;
 
-        // Anchor on a single round 1-3 pick from the buyer — nobody sells surplus for only late picks
+        // Anchor on a pick from the buyer — surplus deals can be rounds 1-5
+        // since these are lower-value keeper-quality players, not franchise assets
         const teamAnchorPicks = teamPicks
-          .filter((p) => p.round <= 3)
+          .filter((p) => p.round <= 5)
           .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
           .sort((a, b) => a.pick_value - b.pick_value);
 
