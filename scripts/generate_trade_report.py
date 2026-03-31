@@ -265,6 +265,14 @@ def generate_report():
                         best_fit = nt
                         break
             if best_fit:
+                # Only suggest if sp would be a top-8 keeper for the receiving team
+                receiving_kvs = sorted(
+                    [p["keeper_value"] for p in best_fit["keeper_worthy"]],
+                    reverse=True
+                )
+                better_count = sum(1 for kv in receiving_kvs if kv > sp["keeper_value"])
+                if better_count >= KEEPERS_PER_TEAM:
+                    continue
                 w(f"  {sp['name']:<26s}({sp['position']}, KV:{sp['keeper_value']:.3f})  {st['name']} -> {best_fit['name']}")
 
     # Diminishing value analysis

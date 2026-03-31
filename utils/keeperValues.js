@@ -102,6 +102,21 @@ export function enrichWithKeeperValues(players) {
   }
   if (maxKeeperValue === 0) maxKeeperValue = 1;
 
+  // Pre-compute positional scoring ranks so low-volume players don't receive
+  // inflated values driven by longevity/scarcity scores alone.
+  const posFpGroups = {};
+  for (const p of players) {
+    const kv = lookupKeeperValue(p.full_name || p.player_name);
+    if (!kv || !p.position || !p.id) continue;
+    if (!posFpGroups[p.position]) posFpGroups[p.position] = [];
+    posFpGroups[p.position].push({ id: p.id, fp: kv.keeper_fantasy_points });
+  }
+  const posRankById = {};
+  for (const entries of Object.values(posFpGroups)) {
+    entries.sort((a, b) => b.fp - a.fp);
+    entries.forEach((e, i) => { posRankById[e.id] = i + 1; });
+  }
+
   return players.map((player) => {
     const name = player.full_name || player.player_name;
     if (!name) return player;
@@ -163,10 +178,20 @@ export function enrichWithKeeperValues(players) {
 
     const rawValue = kv.keeper_value * 10000;
     // Scale keeper values into KTC range using actual max for full spread
-    const bfbValue =
+    let bfbValue =
       NORMALIZE_TO_KTC && maxKtc > 0
         ? Math.round((kv.keeper_value / maxKeeperValue) * maxKtc)
         : Math.round(rawValue);
+
+    // Penalize experienced players who aren't top-30 scorers at their position.
+    // The keeper model can inflate longevity/scarcity scores for low-volume
+    // players (e.g. a WR40 with good age/team situation). Without this penalty
+    // those players show up in surplus trade suggestions at inflated values.
+    const posRank = posRankById[player.id] ?? 999;
+    if (posRank > 30) {
+      const penalty = posRank > 50 ? 0.20 : 0.35;
+      bfbValue = Math.round(bfbValue * penalty);
+    }
 
     return {
       ...player,

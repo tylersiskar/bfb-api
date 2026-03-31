@@ -1297,6 +1297,13 @@ export const getRecommendedTrades = async (req, res) => {
           const offer = myOffer[0];
           if (offer) {
             const offerVal = offer.bfbValue ?? 0;
+
+            // Only suggest if the offered player would crack the receiving team's top 8
+            const receivingFloor = team.keeperWorthy.length >= KEEPER_SLOTS
+              ? (team.keeperWorthy[KEEPER_SLOTS - 1].bfbValue ?? 0)
+              : 0;
+            if (team.keeperWorthy.length >= KEEPER_SLOTS && offerVal <= receivingFloor) continue;
+
             const gap = targetVal - offerVal;
 
             // If close in value, try 1-for-1

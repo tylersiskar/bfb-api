@@ -55,7 +55,13 @@ Note: `years_exp` is 0-indexed from nflreadpy (0 = rookie season).
 
 **Elite Tier Bonus** — Top-5 at each position get a flat bonus scaled by roster demand. Top-3 get the full bonus (0.14 × demand_factor), #4-5 get a scaled-down version. Positions with more starter slots (RB: 2 + FLEX share, WR: 2 + FLEX share) get larger bonuses than QB/TE.
 
-**Positional Keeper Premium** — RBs receive a 1.15x multiplier on their composite score. Calibrated from historical Sleeper trade data (88 trades across 4 seasons) which showed RBs undervalued by ~30% relative to WRs in actual 1-for-1 trades. RB prime windows are shorter, making each elite year more valuable as a keeper asset.
+**Positional Keeper Premium** — RBs receive a 1.15x multiplier on their composite score.
+
+**Positional Scoring Rank Penalty (JS layer)** — Applied in `utils/keeperValues.js` when enriching players for the frontend/API. Experienced players (years_exp > 1) who do not rank in the top 30 at their position by fantasy points scored receive a heavy `bfbValue` discount:
+- Ranked 31–50 at position: **0.35×**
+- Ranked 51+ at position: **0.20×**
+
+This prevents the keeper model's longevity/scarcity sub-scores from inflating trade value for low-volume players (e.g., a WR40 with a favorable age/team situation). Without this penalty such players can appear in surplus trade recommendations at pick values that no realistic trade partner would accept. Rookies and 1st-year players are exempt — they are handled separately by the KTC-blend discounts. Calibrated from historical Sleeper trade data (88 trades across 4 seasons) which showed RBs undervalued by ~30% relative to WRs in actual 1-for-1 trades. RB prime windows are shorter, making each elite year more valuable as a keeper asset.
 
 **Prime Window Discount** — Players with fewer projected elite years (aging curve multiplier >0.7) get discounted via `0.70 + 0.30 × (elite_years / 4)`. A player with 2 elite years scores ~85% of one with 4, one with 1 elite year scores ~78%. This penalizes aging stars as keeper assets despite elite current production.
 
@@ -84,7 +90,7 @@ python scripts/generate_trade_report.py
 Outputs `output/trade_report.txt` with:
 - Keeper value thresholds and tier breakdowns (top 96 = keeper-worthy)
 - Team-by-team keeper analysis (surplus players marked with *, near-keeper-worthy listed)
-- Trade opportunities: surplus/needs matching and suggested fits
+- Trade opportunities: surplus/needs matching and suggested fits (filtered — surplus players are only suggested to teams where they would crack the receiving team's top 8 by keeper value)
 - Diminishing value curves by position
 
 ## Configuration
@@ -121,6 +127,16 @@ The curves represent each position's production as a percentage of their peak ag
 - **WRs** peak 25-29, gradual decline
 - **QBs** maintain production well into their 30s
 - **TEs** late bloomers, peak 26-30
+
+## Recommended Trades (JS API)
+
+The `getRecommendedTrades` endpoint in `controllers/tradeController.js` runs a parallel (but separate) trade suggestion engine for the frontend. It shares the same keeper value data via `utils/keeperValues.js` but has its own pick valuation and fairness scoring. It generates three categories:
+
+- **Upgrades** — trade my keeper + picks for a better keeper at the same position on another team
+- **Fill Needs** — offer a surplus player (+ picks) to acquire a keeper at a position I'm short on
+- **Sell Surplus** — trade my extra keeper-worthy players for picks from teams that need that position
+
+Both `fill_need` and `sell_surplus` enforce a **receiving-team top-8 filter**: a surplus player is only suggested if they would rank in the receiving team's top 8 by `bfbValue`. Combined with the positional scoring rank penalty above, low-volume players are prevented from appearing as meaningful trade assets.
 
 ## Calibration
 
