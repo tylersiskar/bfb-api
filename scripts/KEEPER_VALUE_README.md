@@ -1,11 +1,11 @@
 # Fantasy Football Keeper Value Model
 
-A data-driven keeper value system for a **12-team, 0.5 PPR** dynasty/keeper league with **8 keepers from 16-man rosters**.
+A data-driven keeper value system for a **12-team, 0.5 PPR** keeper league with **8 keepers from 16-man rosters**.
 
 ## What It Does
 
 1. **Pulls 8 years of NFL data** (2018-2025) via `nflreadpy` (seasonal stats, rosters, draft picks, player descriptors)
-2. **Builds positional aging curves** using the delta method — shows how QB/RB/WR/TE production changes with age
+2. **Applies research-based positional aging curves** for QB/RB/WR/TE — hardcoded from fantasy analytics consensus (Baldwin/PFF studies), not data-derived, due to delta method unreliability with limited seasons
 3. **Scores every player's keeper value** using a weighted composite of production, longevity, scarcity, and durability
 4. **Generates a trade report** (`generate_trade_report.py`) by combining keeper values with actual Sleeper league rosters from PostgreSQL — uses a KV threshold (0.178) instead of a fixed pool size to determine keeper-worthy players
 
@@ -24,7 +24,7 @@ WEIGHTS = {
 
 ### Key Mechanics
 
-**Value Over Replacement (VOR)** — Production is measured relative to replacement level (the fantasy points of the #13 player at RB/WR, #7 QB, #7 TE for a 12-team league). All VOR values are normalized globally (not per-position) to avoid overvaluing QB/TE.
+**Value Over Replacement (VOR)** — Production is measured relative to replacement level, defined by positional keeper depth: #13 QB, #21 RB, #21 WR, #9 TE (reflecting 12-team roster demand). All VOR values are normalized globally (not per-position) to avoid overvaluing QB/TE.
 
 **Soft Landing** — Players within 70-100% of replacement level get partial VOR credit instead of a hard zero. This prevents a cliff where a player at 99% of replacement scores the same as one at 50%.
 
@@ -49,11 +49,11 @@ Note: `years_exp` is 0-indexed from nflreadpy (0 = rookie season).
 
 **Draft Capital Blending** — For players with limited game history, draft position (OTC values) blends into the score. The blend weight fades with experience: 40% for rookies, 20% for 2nd year, 10% for 3rd year, 0% after. Capped at 0.40 so unproven draft picks can't outscore proven producers.
 
-**Elite Tier Bonus** — Top-3 at each position get a flat bonus (0.14 scaled by roster demand), compressing elite tiers together. Positions with more starter slots (RB: 2 + FLEX share, WR: 3 + FLEX share) get larger bonuses than QB/TE.
+**Elite Tier Bonus** — Top-5 at each position get a flat bonus scaled by roster demand. Top-3 get the full bonus (0.14 × demand_factor), #4-5 get a scaled-down version. Positions with more starter slots (RB: 2 + FLEX share, WR: 2 + FLEX share) get larger bonuses than QB/TE.
 
 **Positional Keeper Premium** — RBs receive a 1.15x multiplier on their composite score. Calibrated from historical Sleeper trade data (88 trades across 4 seasons) which showed RBs undervalued by ~30% relative to WRs in actual 1-for-1 trades. RB prime windows are shorter, making each elite year more valuable as a keeper asset.
 
-**Prime Window Discount** — Players with fewer projected elite years (aging curve multiplier >0.7) get discounted. A player with 2 elite years left scores ~85% of one with 4. This penalizes aging stars like CMC as keeper assets despite elite current production.
+**Prime Window Discount** — Players with fewer projected elite years (aging curve multiplier >0.7) get discounted via `0.70 + 0.30 × (elite_years / 4)`. A player with 2 elite years scores ~85% of one with 4, one with 1 elite year scores ~78%. This penalizes aging stars as keeper assets despite elite current production.
 
 ## Quick Start
 
@@ -85,24 +85,32 @@ Outputs `output/trade_report.txt` with:
 
 ## Configuration
 
-### Key Constants (top of `keeper_value_model.py`)
+### Key Constants
+
+In `keeper_value_model.py`:
 ```python
 SEASONS = list(range(2018, 2026))  # 8 years of historical data
-KEEPER_SLOTS = 8
-ROSTER_SIZE = 16
-NUM_TEAMS = 12
 PROJECTION_YEARS = 4              # how far ahead to project
 DISCOUNT_RATE = 0.18              # annual uncertainty discount
 MIN_GAMES = 10                    # minimum games to qualify
-STARTERS = {"QB": 1, "RB": 2, "WR": 3, "TE": 1, "FLEX": 1}
 DRAFT_CAPITAL_CAP = 0.40          # max score from draft pedigree alone
+KEEPER_DEPTH = {"QB": 12, "RB": 20, "WR": 20, "TE": 8}  # replacement level cutoffs
+```
+
+In `league_config.py` (shared across all scripts):
+```python
+NUM_TEAMS = 12
+KEEPER_SLOTS = 8
+ROSTER_SIZE = 16
+STARTERS = {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "FLEX": 1}
+FLEX_ELIGIBLE = ["RB", "WR", "TE"]
 ```
 
 ## How the Aging Curves Work
 
-The model uses the **delta method**: for every player-season pair, it calculates the year-over-year change in fantasy points per game, then averages those deltas by position and age. This produces a curve showing, at each age, whether players typically improve or decline.
+The model uses **hardcoded research-based curves** (sourced from Baldwin/PFF aging studies and historical fantasy data analysis) rather than deriving curves from the dataset. The delta method was evaluated but produced unreliable results with limited seasons — RBs in particular generated all-negative cumulative curves due to survivorship bias in year-over-year deltas.
 
-Typical findings:
+The curves represent each position's production as a percentage of their peak age. Highlights:
 - **RBs** peak 23-26, steep cliff after 27
 - **WRs** peak 25-29, gradual decline
 - **QBs** maintain production well into their 30s
