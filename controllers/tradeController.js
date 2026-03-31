@@ -1189,14 +1189,6 @@ export const getRecommendedTrades = async (req, res) => {
     const sorted = [...withValues].sort((a, b) => (b.bfbValue ?? 0) - (a.bfbValue ?? 0));
     const replacementCost = sorted[96]?.bfbValue ?? 0;
 
-    // Average value of each team's 9th-best player — the "9th keeper slot value."
-    // Used as the baseline for surplus trade effective value: surplus players are being
-    // sold as keepers (not waiver pickups), so we discount against this market rate,
-    // not the full replacement cost (97th rostered player).
-    const avg9thKeeperValue = (() => {
-      const vals = teams.map((t) => t.players[8]?.bfbValue ?? 0).filter((v) => v > 0);
-      return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : 0;
-    })();
 
     // 4. Pick slot map + draft picks
     const [{ rosterToSlot }, draftPicks] = await Promise.all([
@@ -1429,7 +1421,7 @@ export const getRecommendedTrades = async (req, res) => {
       // Effective trade value: surplus players are sold as keepers (not waiver fodder),
       // so discount against avg 9th keeper value rather than full replacement cost.
       // This reflects what the seller actually loses — a 9th-keeper-quality asset.
-      const effectiveVal = Math.max(surplusVal - avg9thKeeperValue, 0);
+      const effectiveVal = Math.max(surplusVal - replacementCost, 0);
 
       for (const team of teams) {
         if (team.roster_id === parseInt(roster_id)) continue;
