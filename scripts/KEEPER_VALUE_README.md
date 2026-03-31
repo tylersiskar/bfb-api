@@ -26,20 +26,24 @@ WEIGHTS = {
 
 **Value Over Replacement (VOR)** — Production is measured relative to replacement level, defined by positional keeper depth: #13 QB, #21 RB, #21 WR, #9 TE (reflecting 12-team roster demand). All VOR values are normalized globally (not per-position) to avoid overvaluing QB/TE.
 
-**Soft Landing** — Players within 70-100% of replacement level get partial VOR credit instead of a hard zero. This prevents a cliff where a player at 99% of replacement scores the same as one at 50%.
+**Soft Landing** — Players within 70-100% of replacement level get partial VOR credit instead of a hard zero. This prevents a cliff where a player at 99% of replacement scores the same as one at 50%. The multiplier is kept small (0.10) so soft-landing players cannot outrank those with real positive VOR just above replacement level.
 
 **Recency-Weighted Multi-Season Production** — The model uses up to 3 seasons of data, weighted by experience level:
 
 | Experience (years_exp) | Seasons Used | Weights (latest → oldest) |
 |------------------------|-------------|--------------------------|
 | Rookie (0) | 1 | Latest only |
-| 2nd year (1) | 2 | 3.0 / 1.0 |
+| 2nd year (1) | 2 | 3.0 / 1.0 — **or flipped 1.0 / 3.0 if prior season was ≥15% better per game** (see below) |
 | 3rd year (2) | 3 | 4.0 / 1.5 / 0.25 |
 | 4th-5th year (3-4) | 3 | 4.0 / 1.0 / 0.5 |
 | Mid-career (5-6) | 3 | 4.0 / 1.5 / 1.0 (non-QB) or 3.0 / 2.0 / 1.0 (QB) |
 | Veteran (7+) | 3 | 2.0 / 1.5 / 1.0 |
 
+**2nd-Year Weight Flip** — For players with exactly 2 seasons of data, the default weights (3.0 on latest, 1.0 on prior) are flipped when the prior season's per-game rate was ≥15% higher. This prevents an injury/down year from burying a breakout year (e.g., Jayden Daniels: elite 2024 rookie season vs. injured 2025).
+
 Note: `years_exp` is 0-indexed from nflreadpy (0 = rookie season).
+
+**Current-Season Floor (Veterans)** — For players with more than 3 years of experience, the multi-season weighted average cannot drop below the current season's per-game rate. This prevents mediocre historical seasons (e.g., a pocket passer's lower 0.5 PPR output in prior years) from dragging down a player who is currently performing well.
 
 **Injury-Shortened Season Filter** — Seasons with very few games are dropped so injuries don't tank a player's value:
 - Veterans (>3 years exp): drop seasons with <13 games
@@ -95,6 +99,8 @@ DISCOUNT_RATE = 0.18              # annual uncertainty discount
 MIN_GAMES = 10                    # minimum games to qualify
 DRAFT_CAPITAL_CAP = 0.40          # max score from draft pedigree alone
 KEEPER_DEPTH = {"QB": 12, "RB": 20, "WR": 20, "TE": 8}  # replacement level cutoffs
+# Soft landing multiplier (0.10): small enough that soft-landing players
+# cannot outrank those with real positive VOR just above replacement.
 ```
 
 In `league_config.py` (shared across all scripts):

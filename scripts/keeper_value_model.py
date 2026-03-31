@@ -507,8 +507,24 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
         # 3rd year: 3 seasons, very heavy recency (rookie year barely counts)
         season_weights = {latest_season: 4.0, latest_season - 1: 1.5, latest_season - 2: 0.25}
     else:
-        # years_exp == 1: only 2 seasons used (n_seasons=2)
-        season_weights = {latest_season: 3.0, latest_season - 1: 1.0}
+        # years_exp == 1: only 2 seasons used (n_seasons=2).
+        # Weight the better-performing season more heavily — an injury/down year
+        # shouldn't bury a breakout season (e.g. Daniels: elite 2024, injured 2025).
+        _s1_ppg, _s0_ppg = 0.0, 0.0
+        for _, _r in player_seasons.iterrows():
+            _gp = pd.to_numeric(_r.get("games", 0), errors="coerce")
+            _fp = _r.get("fantasy_points_half_ppr", 0)
+            if pd.isna(_gp) or _gp < 1 or _fp <= 0:
+                continue
+            if _r["season"] == latest_season:
+                _s1_ppg = _fp / _gp
+            else:
+                _s0_ppg = _fp / _gp
+        if _s0_ppg > _s1_ppg * 1.15:
+            # Prior season was ≥15% better per game — weight it 3:1
+            season_weights = {latest_season: 1.0, latest_season - 1: 3.0}
+        else:
+            season_weights = {latest_season: 3.0, latest_season - 1: 1.0}
     weighted_ppg_sum = 0.0
     weight_sum = 0.0
 
@@ -528,9 +544,11 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
     weighted_ppg = weighted_ppg_sum / weight_sum
 
     # Floor: weighted average can't drop below a % of best/latest season PPG.
-    # Young players (<=3 years exp) get a higher floor (90% of latest season)
-    # — if they just proved it, old down years shouldn't tank them significantly.
-    # Veterans get the standard 80% floor off their best season.
+    # All players: floor at current season PPG — recent form is the best predictor
+    # of present value. This prevents multi-year averages from dragging down
+    # players (e.g. pocket passers) whose prior seasons were mediocre in this
+    # scoring format but who are currently performing well.
+    # Young players (<=3 years exp) get a 90% floor; veterans get full current PPG.
     if n_seasons > 1:
         best_ppg = max(
             (r.get("fantasy_points_half_ppr", 0) / max(pd.to_numeric(r.get("games", 1), errors="coerce"), 1))
@@ -538,19 +556,22 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
             if pd.to_numeric(r.get("games", 0), errors="coerce") >= 1 and r.get("fantasy_points_half_ppr", 0) > 0
         )
 
+        latest_row = player_seasons[player_seasons["season"] == latest_season]
+        latest_ppg = 0
+        if not latest_row.empty:
+            lr = latest_row.iloc[0]
+            lr_fp = lr.get("fantasy_points_half_ppr", 0)
+            lr_gp = pd.to_numeric(lr.get("games", 0), errors="coerce")
+            if not pd.isna(lr_gp) and lr_gp >= 1 and lr_fp > 0:
+                latest_ppg = lr_fp / lr_gp
+
         if years_exp <= 3:
             # Young players: floor at 90% of latest season PPG — trust recent proof
-            latest_row = player_seasons[player_seasons["season"] == latest_season]
-            latest_ppg = 0
-            if not latest_row.empty:
-                lr = latest_row.iloc[0]
-                lr_fp = lr.get("fantasy_points_half_ppr", 0)
-                lr_gp = pd.to_numeric(lr.get("games", 0), errors="coerce")
-                if not pd.isna(lr_gp) and lr_gp >= 1 and lr_fp > 0:
-                    latest_ppg = lr_fp / lr_gp
             weighted_ppg = max(weighted_ppg, latest_ppg * 0.90, best_ppg * 0.80)
         else:
-            weighted_ppg = max(weighted_ppg, best_ppg * 0.80)
+            # Veterans: floor at current season PPG so good recent form isn't buried
+            # by prior average seasons (especially relevant for 0.5 PPR pocket passers)
+            weighted_ppg = max(weighted_ppg, latest_ppg, best_ppg * 0.80)
 
     return weighted_ppg * 17, int(player_seasons["games"].sum())
 
@@ -672,8 +693,10 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         # Soft landing: players near replacement get partial credit instead of
         # hard zero. A player at 90% of replacement is still roster-worthy and
         # should score higher than a zero-production draft capital player.
+        # Multiplier kept small (0.10) so soft-landing players cannot outrank
+        # those with real positive VOR just above replacement.
         if vor == 0 and repl > 0 and full_season_fp >= repl * 0.70:
-            vor = (full_season_fp - repl * 0.70) * 0.35
+            vor = (full_season_fp - repl * 0.70) * 0.10
         current_value = vor / max_vor_global
 
         prod_curve = get_expected_production_curve(curves, pos, age)
