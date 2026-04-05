@@ -35,6 +35,27 @@ MIN_GAMES = 10                    # must play 10+ games to qualify
 DRAFT_CAPITAL_DECAY = 0.5         # draft capital loses 50% value per year without production
 DRAFT_BLEND_GAMES = 17            # full season of games before production fully replaces draft capital
 
+# Return uncertainty discount — applied post-composite when a player's most recent
+# season had low game counts. Separate from durability (historical consistency);
+# this models the added risk of acquiring someone who just missed significant time.
+# Only applies to players with years_exp >= 1 (rookies skipped — low gp means "wasn't starting").
+RETURN_UNCERTAINTY_THRESHOLDS = [
+    (15, 1.00),   # 15+ games: no penalty
+    (12, 0.95),   # 12–14: minor concern
+    (9,  0.92),   # 9–11: missed ~6 games, meaningful (one-time event)
+    (6,  0.83),   # 6–8: missed ~10 games, significant uncertainty
+    (0,  0.75),   # <6: major injury, high return risk
+]
+
+# Chronic injury penalty — applied on top of return_uncertainty when a player
+# has shown a PATTERN of missing time. 2+ of their last 3 seasons with <13 games
+# signals systemic durability risk, not a one-off event.
+# Only applies to players with years_exp >= 2 (need enough history to judge).
+CHRONIC_INJURY_GAMES_THRESHOLD = 13   # seasons below this count as "injured"
+CHRONIC_INJURY_MIN_SEASONS = 2        # how many recent bad seasons trigger penalty
+CHRONIC_INJURY_LOOKBACK = 3           # seasons to look back
+CHRONIC_INJURY_MULTIPLIER = 0.88      # additional ~12% discount
+
 # positional weights for composite score
 WEIGHTS = {
     "current_season": 0.45,
@@ -262,6 +283,34 @@ def get_expected_production_curve(curves, position, current_age):
     return multipliers
 
 
+def count_absolute_elite_years(curves, position, current_age, horizon=10, threshold=0.70):
+    """
+    Count how many years (up to horizon) a player will produce at >= threshold
+    of their positional peak (where peak = 1.0 in the aging curve).
+
+    Unlike prod_curve multipliers (which are relative to current performance),
+    this uses the raw aging curve value so a 30yo TE at 0.85 of peak does NOT
+    get credit for years where the curve drops to 0.65 — even though 0.65/0.85
+    is still > 0.70 relative to current.
+
+    No early break: young ascending players (e.g. age 21 TE) are below threshold
+    NOW but will be above it in 2-3 years. Breaking on the first sub-threshold
+    year would report 0 for them, which is wrong.
+    """
+    curve = curves.get(position, {})
+    count = 0
+    for y in range(horizon):
+        future_age = current_age + y
+        val = curve.get(future_age, None)
+        if val is None:
+            last_known = max((a for a in curve if a <= future_age), default=future_age)
+            years_past = future_age - last_known
+            val = max(0, curve.get(last_known, 0.5) - 0.08 * years_past)
+        if val >= threshold:
+            count += 1
+    return count
+
+
 # ── 3. SCARCITY & DURABILITY ───────────────────────────────────────────────
 
 def calculate_positional_scarcity(df, season):
@@ -438,10 +487,16 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
     # Rookie: single season only (limited NFL track record).
     # 2nd year (years_exp=1): 2 seasons with heavy recency.
     # 3rd year+ (years_exp>=2): all 3 seasons.
+    # Established veterans (years_exp>=5): 4 seasons — captures established elite
+    # players whose peak may have been 3 years ago (e.g. Jefferson 2022 elite year
+    # is outside a 3-season window when 2023 was injury-shortened). The 4th season
+    # gets low weight (0.5x) and the best_ppg floor still anchors to their career peak.
     if years_exp <= 0:
         n_seasons = 1
     elif years_exp <= 1:
         n_seasons = 2
+    elif years_exp >= 5:
+        n_seasons = 4
 
     player_seasons = df[
         (df["player_name"] == player_name)
@@ -480,13 +535,17 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
                 if median_others > 0 and best_ppg > median_others * 1.60:
                     outlier_season = best_season
 
-            # Check for outlier bad season (one-off down year)
+            # Check for outlier bad season (one-off down year).
+            # The most recent season is NEVER dropped — it represents current form.
+            # Dropping a player's bad latest season and anchoring to their prior peak
+            # would inflate value for genuinely declining players (e.g. Hubbard 2025).
             if outlier_season is None:
                 worst_season, worst_ppg = min(season_ppgs, key=lambda x: x[1])
-                others = [ppg for s, ppg in season_ppgs if s != worst_season]
-                median_others = sorted(others)[len(others) // 2]
-                if median_others > 0 and worst_ppg < median_others * 0.60:
-                    outlier_season = worst_season
+                if worst_season not in _protected_seasons:
+                    others = [ppg for s, ppg in season_ppgs if s != worst_season]
+                    median_others = sorted(others)[len(others) // 2]
+                    if median_others > 0 and worst_ppg < median_others * 0.60:
+                        outlier_season = worst_season
 
             if outlier_season is not None:
                 player_seasons = player_seasons[player_seasons["season"] != outlier_season]
@@ -520,14 +579,16 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
     # buried behind the absent injury year.
     els = effective_latest_season  # shorthand
     if years_exp >= 7:
-        # Established vets: favor recency but still smooth
-        season_weights = {els: 2.0, els - 1: 1.5, els - 2: 1.0}
+        # Established vets: favor recency but still smooth. 4th season at 0.5x
+        # provides historical context without overriding recent form.
+        season_weights = {els: 2.0, els - 1: 1.5, els - 2: 1.0, els - 3: 0.5}
     elif years_exp >= 5:
-        # Mid-career: heavy recency weighting
+        # Mid-career: heavy recency weighting. 4th season at 0.5x anchors the
+        # best_ppg floor to a player's established peak (e.g. Jefferson 2022).
         if position == "QB":
-            season_weights = {els: 3.0, els - 1: 2.0, els - 2: 1.0}
+            season_weights = {els: 3.0, els - 1: 2.0, els - 2: 1.0, els - 3: 0.5}
         else:
-            season_weights = {els: 4.0, els - 1: 1.5, els - 2: 1.0}
+            season_weights = {els: 4.0, els - 1: 1.5, els - 2: 1.0, els - 3: 0.5}
     elif years_exp >= 3:
         # 4th-5th year: 3 seasons, heavy recency (breakout years dominate)
         season_weights = {els: 4.0, els - 1: 1.0, els - 2: 0.5}
@@ -760,7 +821,10 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         current_value = vor / max_vor_global
 
         prod_curve = get_expected_production_curve(curves, pos, age)
-        elite_years = sum(1 for m in prod_curve if m > 0.7)
+        # Use absolute peak threshold (not relative to current) over 4-year window.
+        # This ensures a 30yo TE whose curve drops to 0.65 of peak doesn't count
+        # as "elite" just because it's still 76% of their already-declining current.
+        elite_years = count_absolute_elite_years(curves, pos, age, horizon=PROJECTION_YEARS)
         if vor > 0:
             future_value = 0
             for y, mult in enumerate(prod_curve):
@@ -777,10 +841,14 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
             # (trajectory >= 0.85) — declining veterans past their positional
             # peak don't have prime years ahead and shouldn't get this boost.
             aging_trajectory = prod_curve[1] if len(prod_curve) > 1 else 0.0
-            # Prime floor requires genuine production — player must clear 90% of replacement.
-            # A backup scraping by below replacement hasn't proven their youth matters.
-            # Without this gate, a soft-landing VOR near zero can unlock the full youth bonus.
-            if longevity_score < 0.01 and elite_years >= 2 and aging_trajectory >= 0.85 and full_season_fp >= repl * 0.90:
+            # Prime floor requires production near replacement — 75% gate.
+            # 90% was too strict: a 23yo WR at 82% of replacement (e.g. MHJ with 9 elite
+            # years) was getting zero longevity credit, ranking below 30yo RBs with 0 elite
+            # years whose scarcity/durability manufactured a similar baseline.
+            # 75% still blocks true backups (Hunt at 67% of RB replacement fails) while
+            # allowing near-lineup young players to get credit for their ascending window.
+            # elite_years=0 players (Hunt) get prime_floor=0 even if they pass the gate.
+            if longevity_score < 0.01 and elite_years >= 2 and aging_trajectory >= 0.85 and full_season_fp >= repl * 0.75:
                 prime_floor = (elite_years / PROJECTION_YEARS) * 0.15
                 longevity_score = max(longevity_score, prime_floor)
         else:
@@ -789,11 +857,22 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         scarcity_score = scarcity.get(pos, 0.5)
         durability_score = calculate_durability(df, name)
 
+        # Scale scarcity and durability by production relative to replacement.
+        # Scarcity rewards positional value in a keeper league, but only matters
+        # if the player can actually fill a roster slot. A backup RB at 35% of
+        # replacement shouldn't get the same scarcity credit as a feature back —
+        # their position's scarcity is irrelevant if they can't contribute.
+        # This prevents zero-production RBs from ranking above productive WRs/TEs
+        # purely on the strength of positional scarcity constants.
+        production_ratio = min(full_season_fp / max(repl, 1), 1.0) if repl > 0 else 1.0
+        effective_scarcity = scarcity_score * max(production_ratio, 0.0)
+        effective_durability = durability_score * max(production_ratio, 0.0)
+
         production_score = (
             WEIGHTS["current_season"] * current_value
             + WEIGHTS["longevity"] * longevity_score
-            + WEIGHTS["scarcity"] * scarcity_score
-            + WEIGHTS["durability"] * durability_score
+            + WEIGHTS["scarcity"] * effective_scarcity
+            + WEIGHTS["durability"] * effective_durability
         ) * confidence
 
         # Blend with draft capital for low-sample players
@@ -810,11 +889,16 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         # Fade floor depends on whether production is near replacement level:
         # - Near/above replacement: draft capital stays relevant (rookie upside)
         # - Well below replacement: draft capital fades aggressively (bust signal)
-        EXPERIENCE_DRAFT_WEIGHT = {0: 0.40, 1: 0.20, 2: 0.10}
+        # Full-season rookies (15+ games, above replacement) use a higher base weight
+        # and higher min_fade: a player who proved himself as a starter for a full
+        # season should carry more draft capital weight as a keeper signal than one
+        # with a small sample. This prevents vets with similar production from
+        # easily outranking clearly elite rookie prospects.
+        EXPERIENCE_DRAFT_WEIGHT = {0: 0.50, 1: 0.20, 2: 0.10}
         draft_weight = EXPERIENCE_DRAFT_WEIGHT.get(years_exp, 0.0)
         games_played_fade = max(1.0 - gp / DRAFT_BLEND_GAMES, 0.0)
         if years_exp == 0 and full_season_fp >= repl * 0.75:
-            min_fade = 0.50
+            min_fade = 0.70 if gp >= 15 else 0.50
         else:
             min_fade = 0.15
         adjusted_draft_weight = draft_weight * max(games_played_fade, min_fade)
@@ -838,14 +922,52 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         POS_KEEPER_PREMIUM = {"QB": 1.0, "RB": 1.08, "WR": 1.0, "TE": 1.0}
         composite *= POS_KEEPER_PREMIUM.get(pos, 1.0)
 
-        # Prime window discount: keeper value should reflect how many elite
-        # years a player has left. A player with 2 remaining elite years is
-        # worth less as a keeper than one with 4, even if current production
-        # is higher. Scale: 4 years = 1.0, 2 years = 0.85, 1 year = 0.75.
-        elite_years = sum(1 for m in prod_curve if m > 0.7)
-        if elite_years < PROJECTION_YEARS:
+        # Prime window discount: penalizes players whose prime is closing.
+        # Only applies to post-peak (descending) players — pre-peak ascending
+        # players should never be discounted for not yet being at their best.
+        # Also skipped when longevity_score is already near zero (< 0.05): in that
+        # case the declining prime window is already priced into longevity, and
+        # adding a prime_discount on top would double-penalize (e.g. a 28yo RB
+        # with near-zero longevity doesn't need an extra 23% cut).
+        # Scale: 4 years = 1.0, 2 years = 0.85, 1 year = 0.775, 0 years = 0.70.
+        _curve = DEFAULT_AGING_CURVES.get(pos, {})
+        peak_age = max(_curve, key=lambda a: _curve[a]) if _curve else 27
+        if age >= peak_age and elite_years < PROJECTION_YEARS and longevity_score >= 0.05:
             prime_discount = 0.70 + 0.30 * (elite_years / PROJECTION_YEARS)
+            # Extra compound penalty per year past positional peak. RBs peak at 24
+            # and decline steeply — a 26yo RB is already 2 years into that decline,
+            # but the elite_years count alone doesn't capture this depth-of-decline.
+            # 5% per year compounds meaningfully: age 26 RB = 0.90x, age 27 = 0.85x.
+            # Floor at 0.80 so very old players aren't double-counted with longevity.
+            years_past_peak = age - peak_age
+            past_peak_multiplier = max(0.80, 1.0 - 0.05 * years_past_peak)
+            prime_discount *= past_peak_multiplier
             composite *= prime_discount
+
+        # Return uncertainty: penalize players whose most recent season had low game counts.
+        # This is forward-looking risk (will they return to form?) not a production penalty.
+        # gp here is the raw most-recent season games — even if that season was filtered
+        # out of the production calculation, the missed games still signal acquisition risk.
+        if years_exp >= 1:
+            return_multiplier = 0.75  # default: <6 games
+            for threshold, multiplier in RETURN_UNCERTAINTY_THRESHOLDS:
+                if gp >= threshold:
+                    return_multiplier = multiplier
+                    break
+            composite *= return_multiplier
+
+        # Chronic injury penalty: compound discount when a player has a PATTERN of
+        # missing time, not just a single bad season. Checks last N seasons of actual
+        # game data (including seasons the production calc may have filtered out).
+        if years_exp >= CHRONIC_INJURY_MIN_SEASONS:
+            player_hist = df[df["player_name"] == name].sort_values("season")
+            if "games" in player_hist.columns:
+                recent_games = pd.to_numeric(
+                    player_hist["games"].tail(CHRONIC_INJURY_LOOKBACK), errors="coerce"
+                ).dropna()
+                low_game_seasons = int((recent_games < CHRONIC_INJURY_GAMES_THRESHOLD).sum())
+                if low_game_seasons >= CHRONIC_INJURY_MIN_SEASONS:
+                    composite *= CHRONIC_INJURY_MULTIPLIER
 
         results.append({
             "player_name": name,
@@ -861,7 +983,7 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
             "durability_score": round(durability_score, 3),
             "draft_capital_score": round(draft_score, 3),
             "keeper_value": round(composite, 3),
-            "projected_years_elite": sum(1 for m in prod_curve if m > 0.7),
+            "projected_years_elite": count_absolute_elite_years(curves, pos, age, horizon=10),
         })
 
     # ── Score players WITHOUT stats (draft capital only — rookies, injured, etc.)
@@ -902,7 +1024,7 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
                 "durability_score": 0.5,
                 "draft_capital_score": round(draft_score, 3),
                 "keeper_value": round(draft_score, 3),
-                "projected_years_elite": sum(1 for m in prod_curve if m > 0.7),
+                "projected_years_elite": count_absolute_elite_years(curves, pos, age, horizon=10),
             })
             draft_only_count += 1
 
