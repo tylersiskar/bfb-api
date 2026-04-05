@@ -43,6 +43,7 @@ function loadKeeperValues() {
         projected_years_elite: parseInt(row.projected_years_elite) || 0,
         keeper_fantasy_points: parseFloat(row.fantasy_points) || 0,
         years_exp: parseInt(row.years_exp) || 0,
+        age: parseInt(row.age) || null,
         games_played: parseInt(row.games_played) || 0,
       });
     }
@@ -148,6 +149,7 @@ export function enrichWithKeeperValues(players) {
       durability_score: kv.durability_score,
       current_value: kv.current_value,
       projected_years_elite: kv.projected_years_elite,
+      ...(kv.age != null ? { age: kv.age } : {}),
     };
 
     // Incoming rookies with 0 NFL games: discount KTC dynasty value

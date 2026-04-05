@@ -429,7 +429,10 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
     Calculate a production average across recent seasons.
     For veterans (>=5 years exp): recency-weighted across 3 seasons (3x/2x/1x).
     For younger players (<5 years exp): only use the most recent season.
-    Returns (weighted_full_season_fp, total_games) or (None, 0) if no data.
+    Returns (weighted_full_season_fp, effective_gp) or (None, 0) if no data.
+    effective_gp is the games played in the most recent season actually used for
+    weighting (after dropping injury-shortened seasons), so confidence at the
+    call site reflects the data we're actually basing the estimate on.
     """
     # years_exp is 0-indexed (0 = rookie season, 1 = 2nd year, etc.)
     # Rookie: single season only (limited NFL track record).
@@ -490,33 +493,47 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
 
     # Exclude low-game seasons — injury-shortened years shouldn't tank value.
     # Veterans (>3 years): drop seasons with <13 games.
-    # Young players (<=3 years): only drop truly injured seasons (<6 games)
-    # to avoid penalizing guys like Nabers (4 games) while keeping
-    # half-season performances (8+ games) that represent real production.
+    # Young players (<=3 years): drop seasons with <10 games — catches genuine
+    # injury-shortened half-seasons (e.g. LaPorta 9 games) while still keeping
+    # data for players who missed only a couple games. Nabers' 4-game season
+    # is also caught. Raising from 6 → 10 to be consistent with the 13-game
+    # veteran standard (~60-75% of a full season required for both groups).
     if len(player_seasons) > 1:
-        game_threshold = 13 if years_exp > 3 else 6
+        game_threshold = 13 if years_exp > 3 else 10
         full_seasons = player_seasons[
             pd.to_numeric(player_seasons["games"], errors="coerce") >= game_threshold
         ]
         if len(full_seasons) >= 1:
             player_seasons = full_seasons
 
-    # Recency-weighted season weights by experience tier
+    # Effective latest season: the most recent season still present after the
+    # injury filter. If the latest season was dropped (e.g. LaPorta 2025 = 9
+    # games), anchor recency weights to the new most-recent season so that
+    # season receives the 4x weight instead of being effectively downweighted
+    # behind the now-absent injury year.
+    effective_latest_season = int(player_seasons["season"].max())
+
+    # Recency-weighted season weights anchored to effective_latest_season.
+    # This matters when the true latest season was dropped due to injury —
+    # effective_latest_season becomes the prior full season (e.g. 2024 for a
+    # player injured in 2025), which gets the top weight instead of being
+    # buried behind the absent injury year.
+    els = effective_latest_season  # shorthand
     if years_exp >= 7:
         # Established vets: favor recency but still smooth
-        season_weights = {latest_season: 2.0, latest_season - 1: 1.5, latest_season - 2: 1.0}
+        season_weights = {els: 2.0, els - 1: 1.5, els - 2: 1.0}
     elif years_exp >= 5:
         # Mid-career: heavy recency weighting
         if position == "QB":
-            season_weights = {latest_season: 3.0, latest_season - 1: 2.0, latest_season - 2: 1.0}
+            season_weights = {els: 3.0, els - 1: 2.0, els - 2: 1.0}
         else:
-            season_weights = {latest_season: 4.0, latest_season - 1: 1.5, latest_season - 2: 1.0}
+            season_weights = {els: 4.0, els - 1: 1.5, els - 2: 1.0}
     elif years_exp >= 3:
         # 4th-5th year: 3 seasons, heavy recency (breakout years dominate)
-        season_weights = {latest_season: 4.0, latest_season - 1: 1.0, latest_season - 2: 0.5}
+        season_weights = {els: 4.0, els - 1: 1.0, els - 2: 0.5}
     elif years_exp >= 2:
         # 3rd year: 3 seasons, very heavy recency (rookie year barely counts)
-        season_weights = {latest_season: 4.0, latest_season - 1: 1.5, latest_season - 2: 0.25}
+        season_weights = {els: 4.0, els - 1: 1.5, els - 2: 0.25}
     else:
         # years_exp == 1: only 2 seasons used (n_seasons=2).
         # Weight the better-performing season more heavily — an injury/down year
@@ -527,15 +544,15 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
             _fp = _r.get("fantasy_points_half_ppr", 0)
             if pd.isna(_gp) or _gp < 1 or _fp <= 0:
                 continue
-            if _r["season"] == latest_season:
+            if _r["season"] == els:
                 _s1_ppg = _fp / _gp
             else:
                 _s0_ppg = _fp / _gp
         if _s0_ppg > _s1_ppg * 1.15:
             # Prior season was ≥15% better per game — weight it 3:1
-            season_weights = {latest_season: 1.0, latest_season - 1: 3.0}
+            season_weights = {els: 1.0, els - 1: 3.0}
         else:
-            season_weights = {latest_season: 3.0, latest_season - 1: 1.0}
+            season_weights = {els: 3.0, els - 1: 1.0}
     weighted_ppg_sum = 0.0
     weight_sum = 0.0
 
@@ -560,6 +577,15 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
     # players (e.g. pocket passers) whose prior seasons were mediocre in this
     # scoring format but who are currently performing well.
     # Young players (<=3 years exp) get a 90% floor; veterans get full current PPG.
+    # Compute effective_gp: games played in the effective latest season.
+    # Used by the caller for confidence — reflects the data we're actually
+    # basing the estimate on (not the possibly-dropped injury season).
+    effective_latest_row = player_seasons[player_seasons["season"] == effective_latest_season]
+    effective_gp = 0
+    if not effective_latest_row.empty:
+        eg = pd.to_numeric(effective_latest_row.iloc[0].get("games", 0), errors="coerce")
+        effective_gp = int(eg) if not pd.isna(eg) else 0
+
     if n_seasons > 1:
         best_ppg = max(
             (r.get("fantasy_points_half_ppr", 0) / max(pd.to_numeric(r.get("games", 1), errors="coerce"), 1))
@@ -567,24 +593,25 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
             if pd.to_numeric(r.get("games", 0), errors="coerce") >= 1 and r.get("fantasy_points_half_ppr", 0) > 0
         )
 
-        latest_row = player_seasons[player_seasons["season"] == latest_season]
-        latest_ppg = 0
-        if not latest_row.empty:
-            lr = latest_row.iloc[0]
+        # Floor uses effective latest season PPG (not the possibly-dropped injury year)
+        effective_row = player_seasons[player_seasons["season"] == effective_latest_season]
+        effective_ppg = 0
+        if not effective_row.empty:
+            lr = effective_row.iloc[0]
             lr_fp = lr.get("fantasy_points_half_ppr", 0)
             lr_gp = pd.to_numeric(lr.get("games", 0), errors="coerce")
             if not pd.isna(lr_gp) and lr_gp >= 1 and lr_fp > 0:
-                latest_ppg = lr_fp / lr_gp
+                effective_ppg = lr_fp / lr_gp
 
         if years_exp <= 3:
-            # Young players: floor at 90% of latest season PPG — trust recent proof
-            weighted_ppg = max(weighted_ppg, latest_ppg * 0.90, best_ppg * 0.80)
+            # Young players: floor at 90% of effective latest season PPG — trust recent proof
+            weighted_ppg = max(weighted_ppg, effective_ppg * 0.90, best_ppg * 0.80)
         else:
-            # Veterans: floor at current season PPG so good recent form isn't buried
+            # Veterans: floor at effective latest season PPG so good recent form isn't buried
             # by prior average seasons (especially relevant for 0.5 PPR pocket passers)
-            weighted_ppg = max(weighted_ppg, latest_ppg, best_ppg * 0.80)
+            weighted_ppg = max(weighted_ppg, effective_ppg, best_ppg * 0.80)
 
-    return weighted_ppg * 17, int(player_seasons["games"].sum())
+    return weighted_ppg * 17, effective_gp
 
 
 def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_players_df=None, target_season=None):
@@ -627,10 +654,11 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         else:
             rookie_yr = row.get("rookie_year") or row.get("rookie_season") or row.get("draft_year")
             years_exp = max(0, latest_season - int(rookie_yr)) if pd.notna(rookie_yr) else 99
-        weighted_fp, _ = get_weighted_production(df, name, latest_season, years_exp=years_exp, position=pos)
+        weighted_fp, effective_gp = get_weighted_production(df, name, latest_season, years_exp=years_exp, position=pos)
         if weighted_fp is None or weighted_fp <= 0:
             ppg = fp / max(gp, 1)
             weighted_fp = ppg * 17
+            effective_gp = gp  # fallback: use current season games
 
         # Declining veterans: cap weighted FP at current-season actual.
         # Multi-season weighting smooths injury years, but for a genuinely
@@ -648,7 +676,12 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
                 current_season_fp = (fp / max(gp, 1)) * 17
                 weighted_fp = min(weighted_fp, current_season_fp)
 
-        confidence = min(gp / MIN_GAMES, 1.0)
+        # Use effective_gp (games in the season actually driving the estimate) for
+        # confidence — not the potentially injury-shortened current season. This
+        # means a player whose injury year was dropped has confidence based on their
+        # last full season, which is correct since that's what weighted_fp reflects.
+        confidence_gp = effective_gp if effective_gp > 0 else gp
+        confidence = min(confidence_gp / MIN_GAMES, 1.0)
         qualified.append({"row": row, "pos": pos, "gp": gp, "full_season_fp": weighted_fp, "confidence": confidence, "name": name, "years_exp": years_exp})
 
     # ── Compute replacement-level FP per position
@@ -802,7 +835,7 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         # so each elite RB year is worth more as a keeper asset. This premium
         # is calibrated from historical trade data showing RBs undervalued by
         # ~30% relative to WRs in actual league trades.
-        POS_KEEPER_PREMIUM = {"QB": 1.0, "RB": 1.20, "WR": 1.0, "TE": 1.0}
+        POS_KEEPER_PREMIUM = {"QB": 1.0, "RB": 1.08, "WR": 1.0, "TE": 1.0}
         composite *= POS_KEEPER_PREMIUM.get(pos, 1.0)
 
         # Prime window discount: keeper value should reflect how many elite

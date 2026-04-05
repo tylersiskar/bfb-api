@@ -1302,7 +1302,23 @@ export const getRecommendedTrades = async (req, res) => {
 
         for (const target of betterPlayers) {
           const targetVal = target.bfbValue ?? 0;
-          const gap = targetVal - myVal;
+
+          // Hard skip: never recommend acquiring a player 6+ years older.
+          // Use real age from keeper_values.csv when available; fall back to years_exp.
+          const myAge = myPlayer.age ?? (myPlayer.years_exp != null ? 22 + myPlayer.years_exp : 27);
+          const targetAge = target.age ?? (target.years_exp != null ? 22 + target.years_exp : 27);
+          const ageDiff = targetAge - myAge;  // positive = target is older
+          if (ageDiff >= 6) break;
+
+          // Tiered age penalty: acquiring an older player reduces their effective value;
+          // acquiring a younger one increases it.
+          let ageFactor = 1.0;
+          if (ageDiff >= 5)       ageFactor = 0.75;
+          else if (ageDiff >= 3)  ageFactor = 0.85;
+          else if (ageDiff <= -2) ageFactor = 1.10;
+          const adjustedTargetVal = Math.round(targetVal * ageFactor);
+
+          const gap = adjustedTargetVal - myVal;
 
           // Other team's late picks available as "change back"
           const theirLatePicks = draftPicks
@@ -1317,12 +1333,8 @@ export const getRecommendedTrades = async (req, res) => {
           if (givePicks.length > 0) {
             const givePickTotal = givePicks.reduce((s, p) => s + p.pick_value, 0);
             const receivePickTotal = receivePicks.reduce((s, p) => s + p.pick_value, 0);
-            const fairness = computeFairness(
-              [myVal], givePickTotal, 1 + receivePicks.length,
-              [targetVal], receivePickTotal, 1 + givePicks.length,
-            );
             const rawFairness = computeRawFairness(
-              [myVal], givePickTotal, [targetVal], receivePickTotal,
+              [myVal], givePickTotal, [adjustedTargetVal], receivePickTotal,
             );
             for (const p of givePicks) usedUpgradePickKeys.add(`${p.round}-${p.season}-${p.original_roster_id}`);
             upgrades.push({
@@ -1514,37 +1526,44 @@ export const getRecommendedTrades = async (req, res) => {
         if (surplusVal <= teamFloor && team.keeperWorthy.length >= KEEPER_SLOTS) continue;
 
         // effectiveVal = net gain for the buyer: player value minus who they'd drop.
-        // Per-team floor rather than a global baseline so each team's situation is
-        // evaluated on its own merits.
         const effectiveVal = Math.max(surplusVal - teamFloor, 0);
         if (effectiveVal <= 0) continue;
 
         const teamPicks = draftPicks.filter((p) => p.current_roster_id === team.roster_id);
         if (teamPicks.length === 0) continue;
 
-        // Anchor on a pick from the buyer — surplus deals can be rounds 1-5
+        // Surplus deals are paid in R3-R5 picks only — 2nd rounders are too valuable to
+        // spend on a borderline surplus player. Teams without R3-R5 picks are skipped.
         const teamAnchorPicks = teamPicks
-          .filter((p) => p.round <= 5)
+          .filter((p) => p.round >= 3 && p.round <= 5)
           .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
           .sort((a, b) => a.pick_value - b.pick_value);
 
         if (teamAnchorPicks.length === 0) continue;
 
-        const anchor = teamAnchorPicks.find((p) => p.pick_value >= effectiveVal * 0.5)
-          || teamAnchorPicks[teamAnchorPicks.length - 1];
+        // Apply a seller's discount: surplus players trade at a haircut because the
+        // seller is motivated and the buyer takes on marginal roster risk.
+        // Targets R3/R4 picks rather than R2s for typical surplus deals.
+        const pickTargetVal = Math.round(effectiveVal * 0.75);
+
+        // Find the highest-valued pick that doesn't exceed the discounted target.
+        const belowPicks = teamAnchorPicks.filter((p) => p.pick_value <= pickTargetVal);
+        const anchor = belowPicks.length > 0
+          ? belowPicks[belowPicks.length - 1]
+          : teamAnchorPicks[0];
 
         let receivePicks = [anchor];
         let receiveTotal = anchor.pick_value;
         let givePicks = [];
         let givePickTotal = 0;
 
-        if (receiveTotal > effectiveVal * 1.3) {
+        if (receiveTotal > pickTargetVal * 1.3) {
           const myLatePicks = myPicks
             .filter((p) => p.round >= 4)
             .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
             .sort((a, b) => a.pick_value - b.pick_value);
 
-          const overshoot = receiveTotal - effectiveVal;
+          const overshoot = receiveTotal - pickTargetVal;
           const balancePick = myLatePicks.find((p) => p.pick_value >= overshoot * 0.5 && p.pick_value <= overshoot * 1.5);
           if (balancePick) {
             givePicks.push(balancePick);
@@ -1552,7 +1571,7 @@ export const getRecommendedTrades = async (req, res) => {
           }
         }
 
-        if (receiveTotal >= effectiveVal * 0.5) {
+        if (receiveTotal > 0) {
           // Fairness based on effectiveVal, not raw surplusVal
           const fairness = computeRawFairness(
             [effectiveVal], givePickTotal, [], receiveTotal,
