@@ -2,7 +2,7 @@
 // Non-linear scaling so stars are worth exponentially more than role players.
 // This is the core mechanism preventing "4 mediocre guys = 1 star" trades.
 
-const ELITE_EXPONENT = 1.65;
+const ELITE_EXPONENT = 1.6;
 
 // ── Package Tax ──────────────────────────────────────────────────────────
 // Penalty applied to the side sending more assets in a trade.
@@ -61,7 +61,11 @@ const PICK_ROUND_VALUES = { 1: ROUND_1_VALUES, 2: ROUND_2_VALUES, 3: ROUND_3_VAL
 // Flat per-round values for rounds 4-8
 const LATE_ROUND_VALUES = { 4: 200, 5: 150, 6: 100, 7: 75, 8: 50 };
 
-export const getPickValue = (round, slot, yearsOut = 0) => {
+// teamStrength: "early" | "mid" | "late" — adjusts unresolved future picks by ±15%
+//   based on the originating team's expected draft position. Ignored for current-year picks.
+// rebuildingMode: when true, suppresses future-pick depreciation entirely.
+//   Rebuilding teams value future picks at full face value — those picks ARE their plan.
+export const getPickValue = (round, slot, yearsOut = 0, teamStrength = "mid", rebuildingMode = false) => {
   const clampedSlot = Math.max(1, Math.min(slot, LEAGUE_SIZE));
   const roundValues = PICK_ROUND_VALUES[round];
 
@@ -72,7 +76,17 @@ export const getPickValue = (round, slot, yearsOut = 0) => {
     base = LATE_ROUND_VALUES[round] ?? 50;
   }
 
-  return Math.round(base * Math.pow(PICK_FUTURE_DEPRECIATION, yearsOut));
+  const yearsForDepreciation = rebuildingMode ? 0 : yearsOut;
+  let depreciated = Math.round(base * Math.pow(PICK_FUTURE_DEPRECIATION, yearsForDepreciation));
+
+  // Apply team-strength adjustment only to unresolved future picks
+  if (yearsOut > 0 && !rebuildingMode) {
+    const STRENGTH_MULTIPLIERS = { early: 1.15, mid: 1.0, late: 0.85 };
+    const mult = STRENGTH_MULTIPLIERS[teamStrength] ?? 1.0;
+    depreciated = Math.round(depreciated * mult);
+  }
+
+  return depreciated;
 };
 
 // ── Pick Consolidation Penalty ──────────────────────────────────────────

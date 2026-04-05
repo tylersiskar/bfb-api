@@ -37,8 +37,8 @@ DRAFT_BLEND_GAMES = 17            # full season of games before production fully
 
 # positional weights for composite score
 WEIGHTS = {
-    "current_season": 0.57,
-    "longevity":      0.25,
+    "current_season": 0.45,
+    "longevity":      0.37,
     "scarcity":       0.13,
     "durability":     0.05,
 }
@@ -393,7 +393,6 @@ def calculate_draft_capital_score(player_row, draft_value_lookup, latest_season)
     pos_mult = DRAFT_POS_MULTIPLIER.get(position, 1.0)
 
     years_since_draft = max(0, latest_season - rookie_season)
-    decay = DRAFT_CAPITAL_DECAY ** years_since_draft
 
     birth_date = player_row.get("birth_date")
     if pd.notna(birth_date):
@@ -405,9 +404,16 @@ def calculate_draft_capital_score(player_row, draft_value_lookup, latest_season)
     else:
         age = 22 if years_since_draft == 0 else 22 + years_since_draft
 
+    # Softer decay for young players (age < 23): 0.60/yr instead of 0.50/yr
+    # A 21-year-old top-3 pick shouldn't lose 50% of stock after one quiet season
+    _decay_rate = 0.6 if age < 23 else DRAFT_CAPITAL_DECAY
+    decay = _decay_rate ** years_since_draft
+
     draft_score = base_score * pos_mult * decay
+    # Higher cap for first-round young picks — they haven't had a chance to bust yet
+    _cap = 0.45 if (pd.notna(draft_round) and int(draft_round) == 1 and age < 23) else DRAFT_CAPITAL_CAP
     return {
-        "draft_score": round(min(draft_score, DRAFT_CAPITAL_CAP), 4),
+        "draft_score": round(min(draft_score, _cap), 4),
         "age": int(age),
         "position": position,
         "draft_round": int(draft_round) if pd.notna(draft_round) else None,
@@ -459,8 +465,13 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
             outlier_season = None
 
             # Check for outlier good season first (non-recent fluke inflates value)
+            # Protect the most recent season always; also protect year N-1 for young players
+            # (a breakout in year N-1 followed by injury in year N is real signal, not a fluke)
             best_season, best_ppg = max(season_ppgs, key=lambda x: x[1])
-            if best_season != latest_season:
+            _protected_seasons = {latest_season}
+            if years_exp < 4:
+                _protected_seasons.add(latest_season - 1)
+            if best_season not in _protected_seasons:
                 others = [ppg for s, ppg in season_ppgs if s != best_season]
                 median_others = sorted(others)[len(others) // 2]
                 if median_others > 0 and best_ppg > median_others * 1.60:
@@ -733,7 +744,10 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
             # (trajectory >= 0.85) — declining veterans past their positional
             # peak don't have prime years ahead and shouldn't get this boost.
             aging_trajectory = prod_curve[1] if len(prod_curve) > 1 else 0.0
-            if longevity_score < 0.01 and elite_years >= 2 and aging_trajectory >= 0.85:
+            # Prime floor requires genuine production — player must clear 90% of replacement.
+            # A backup scraping by below replacement hasn't proven their youth matters.
+            # Without this gate, a soft-landing VOR near zero can unlock the full youth bonus.
+            if longevity_score < 0.01 and elite_years >= 2 and aging_trajectory >= 0.85 and full_season_fp >= repl * 0.90:
                 prime_floor = (elite_years / PROJECTION_YEARS) * 0.15
                 longevity_score = max(longevity_score, prime_floor)
         else:
@@ -788,7 +802,7 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         # so each elite RB year is worth more as a keeper asset. This premium
         # is calibrated from historical trade data showing RBs undervalued by
         # ~30% relative to WRs in actual league trades.
-        POS_KEEPER_PREMIUM = {"QB": 1.0, "RB": 1.15, "WR": 1.0, "TE": 1.0}
+        POS_KEEPER_PREMIUM = {"QB": 1.0, "RB": 1.20, "WR": 1.0, "TE": 1.0}
         composite *= POS_KEEPER_PREMIUM.get(pos, 1.0)
 
         # Prime window discount: keeper value should reflect how many elite

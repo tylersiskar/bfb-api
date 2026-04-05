@@ -211,7 +211,14 @@ function getTradeablePlayers(team, incomingPlayer) {
 }
 
 // Build per-team analysis from rosters + playerMap + keeperWorthyIds
-function buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers = {}) {
+// surplusPoolIds: top-120 pool for identifying surplus players (defaults to keeperWorthyIds if not provided)
+function buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers = {}, surplusPoolIds = keeperWorthyIds) {
+  // Global median keeper value across all keeper-worthy players — used for upgrade need detection
+  const allKeeperWorthyPlayers = [...keeperWorthyIds].map((id) => playerMap[id]).filter(Boolean);
+  const globalMedianVal = allKeeperWorthyPlayers.length > 0
+    ? (allKeeperWorthyPlayers.sort((a, b) => (b.bfbValue ?? 0) - (a.bfbValue ?? 0))[Math.floor(allKeeperWorthyPlayers.length / 2)]?.bfbValue ?? 0)
+    : 0;
+
   return rosters.map((roster) => {
     const rosterPlayers = (roster.player_ids ?? [])
       .map((id) => playerMap[id])
@@ -230,29 +237,46 @@ function buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers =
       keeperWorthy = resolvedKeepers
         .sort((a, b) => (b.bfbValue ?? 0) - (a.bfbValue ?? 0))
         .slice(0, KEEPER_SLOTS);
-      // Surplus = remaining roster players that are top-96 worthy AND meaningfully below worst keeper
+      // Surplus = top-120 players not in keeper core AND meaningfully below worst keeper
       const keeperIdSet = new Set(keeperWorthy.map((p) => p.id));
       const worstKeeperVal = keeperWorthy[keeperWorthy.length - 1]?.bfbValue ?? 0;
       surplus = rosterPlayers
-        .filter((p) => !keeperIdSet.has(p.id) && (p.bfbValue ?? 0) > 0 && (p.bfbValue ?? 0) < worstKeeperVal * 0.95);
+        .filter((p) => !keeperIdSet.has(p.id) && surplusPoolIds.has(p.id) && (p.bfbValue ?? 0) > 0 && (p.bfbValue ?? 0) < worstKeeperVal * 0.95);
     } else {
       // No keepers set — project top 8 by value, then check rest of roster
-      const allKeeperWorthy = rosterPlayers.filter((p) => keeperWorthyIds.has(p.id));
-      keeperWorthy = allKeeperWorthy.slice(0, KEEPER_SLOTS);
+      const allKeeperWorthyOnRoster = rosterPlayers.filter((p) => keeperWorthyIds.has(p.id));
+      keeperWorthy = allKeeperWorthyOnRoster.slice(0, KEEPER_SLOTS);
       const projectedKeeperIds = new Set(keeperWorthy.map((p) => p.id));
       const worstKeeperVal = keeperWorthy[keeperWorthy.length - 1]?.bfbValue ?? 0;
       surplus = rosterPlayers
-        .filter((p) => !projectedKeeperIds.has(p.id) && (p.bfbValue ?? 0) > 0 && (p.bfbValue ?? 0) < worstKeeperVal * 0.95);
+        .filter((p) => !projectedKeeperIds.has(p.id) && surplusPoolIds.has(p.id) && (p.bfbValue ?? 0) > 0 && (p.bfbValue ?? 0) < worstKeeperVal * 0.95);
     }
 
     const byPos = {};
     for (const pos of Object.keys(STARTER_COUNTS)) {
       byPos[pos] = keeperWorthy.filter((p) => p.position === pos);
     }
-    const needs = [];
+
+    // Tiered needs detection:
+    // criticalNeeds = missing starters entirely at a position
+    // upgradeNeeds  = has starters but all are below-average keeper value
+    const criticalNeeds = [];
+    const upgradeNeeds = [];
     for (const [pos, count] of Object.entries(STARTER_COUNTS)) {
-      if ((byPos[pos]?.length ?? 0) < count) needs.push(pos);
+      const posPlayers = byPos[pos] ?? [];
+      if (posPlayers.length === 0 || posPlayers.length < count) {
+        criticalNeeds.push(pos);
+      } else {
+        const posAvg = posPlayers.reduce((s, p) => s + (p.bfbValue ?? 0), 0) / posPlayers.length;
+        if (posAvg < globalMedianVal * 0.85) upgradeNeeds.push(pos);
+      }
     }
+    // backward-compat union
+    const needs = [...new Set([...criticalNeeds, ...upgradeNeeds])];
+
+    // Team mode based on win record: contend (6+ wins), rebuild (<4 wins), neutral otherwise
+    const wins = roster.wins ?? 0;
+    const teamMode = wins >= 6 ? "contend" : wins < 4 ? "rebuild" : "neutral";
 
     return {
       roster_id: roster.roster_id,
@@ -261,6 +285,9 @@ function buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers =
       keeperWorthy,
       surplus,
       needs,
+      criticalNeeds,
+      upgradeNeeds,
+      teamMode,
       byPos,
       keepersSet: !!setKeeperIds,
     };
@@ -289,11 +316,12 @@ export const findDeals = async (req, res) => {
 
     const { withValues, playerMap } = enrichPlayers(players);
 
-    // 3. Keeper-worthy pool (top 96 by bfbValue)
+    // 3. Keeper-worthy pool (top 96 by bfbValue) + surplus pool (top 120)
     const keeperWorthyIds = getKeeperWorthyIds(withValues);
+    const surplusPoolIds = getKeeperWorthyIds(withValues, 120);
 
     // 4. Build per-team analysis
-    const teams = buildTeamAnalysis(rosters, playerMap, keeperWorthyIds);
+    const teams = buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, {}, surplusPoolIds);
 
     const myTeam = teams.find((t) => t.roster_id === parseInt(roster_id));
 
@@ -304,8 +332,9 @@ export const findDeals = async (req, res) => {
     ]);
 
     // Pick value using the perceived-value curve (no separate keeper discount needed)
-    const rawPickValue = (pick) =>
-      getPickValue(pick.round, rosterToSlot[pick.original_roster_id] ?? 6, pick.season > year ? 1 : 0);
+    // isRebuilding: suppresses future-pick depreciation for teams in rebuild mode (see teamMode)
+    const rawPickValue = (pick, isRebuilding = false) =>
+      getPickValue(pick.round, rosterToSlot[pick.original_roster_id] ?? 6, pick.season > year ? 1 : 0, "mid", isRebuilding);
 
     // ── PICK TARGET: deal generation for acquiring/selling a draft pick ──
     if (isPickTarget) {
@@ -781,7 +810,10 @@ export const findDeals = async (req, res) => {
           }
 
           const discountedPickTotal = applyConsolidationDiscount(pickTotal, picksToInclude.length);
-          if (discountedPickTotal >= gap * 0.6) {
+          // Verify the team actually has enough picks of the required caliber
+          const maxRoundNeeded = picksToInclude.length > 0 ? Math.max(...picksToInclude.map((p) => p.round)) : 99;
+          const teamAvailableInRange = teamPicks.filter((p) => p.round <= maxRoundNeeded).length;
+          if (discountedPickTotal >= gap * 0.6 && teamAvailableInRange >= picksToInclude.length) {
             const fairness = computeFairness(
               [selectedValue], 0, 1 + picksToInclude.length,
               [basePlayer.bfbValue ?? 0], pickTotal, 1,
@@ -964,6 +996,41 @@ export const findDeals = async (req, res) => {
       }
     }
 
+    // 6b. Bilateral surplus swaps — "I have surplus RB, you have surplus WR, we both fill a hole"
+    // This deal type is not generated elsewhere; it's the most common mutually-beneficial keeper trade.
+    if (myTeam) {
+      const COMPLEMENT_MAP = { RB: ["WR", "TE"], WR: ["RB", "TE"], TE: ["RB", "WR"], QB: ["WR"] };
+      for (const mySurplusPlayer of myTeam.surplus) {
+        const myPos = mySurplusPlayer.position;
+        const myVal = mySurplusPlayer.bfbValue ?? 0;
+        const compPositions = COMPLEMENT_MAP[myPos] ?? [];
+
+        for (const team of teams) {
+          if (team.roster_id === parseInt(roster_id)) continue;
+          if (!team.needs.includes(myPos)) continue;
+
+          const theirMatch = team.surplus.find(
+            (p) =>
+              compPositions.includes(p.position) &&
+              (p.bfbValue ?? 0) >= myVal * 0.7 &&
+              (p.bfbValue ?? 0) <= myVal * 1.3,
+          );
+          if (!theirMatch) continue;
+
+          const fairness = computeFairness([myVal], 0, 1, [theirMatch.bfbValue ?? 0], 0, 1);
+          deals.push({
+            target_team: { roster_id: team.roster_id, display_name: team.display_name },
+            type: "bilateral_surplus_swap",
+            give: { players: [formatPlayer(mySurplusPlayer)], picks: [] },
+            receive: { players: [formatPlayer(theirMatch)], picks: [] },
+            fairness,
+            rationale: `Surplus swap: send ${myPos}, receive ${theirMatch.position}${myTeam.needs.includes(theirMatch.position) ? " (fills your need)" : ""}`,
+          });
+          break;
+        }
+      }
+    }
+
     // 7. Filter by deal preference
     const filteredDeals = !deal_pref || deal_pref === "any"
       ? deals
@@ -974,6 +1041,17 @@ export const findDeals = async (req, res) => {
         });
 
     // 8. Score and rank — prefer fairest deals, limit to 4
+
+    // Age/timeline re-scoring: penalize acquiring older players, bonus for acquiring younger
+    for (const deal of filteredDeals) {
+      if (!["player_for_player", "player_plus_picks"].includes(deal.type)) continue;
+      const givenAge = deal.give?.players?.[0]?.age ?? 27;
+      const recvAge = deal.receive?.players?.[0]?.age ?? 27;
+      const diff = recvAge - givenAge;
+      if (diff >= 3) deal.fairness = Math.round(deal.fairness * 0.92);
+      else if (diff <= -2) deal.fairness = Math.min(Math.round(deal.fairness * 1.05), 65);
+    }
+
     filteredDeals.sort((a, b) => Math.abs(a.fairness - 50) - Math.abs(b.fairness - 50));
 
     // Deduplicate: max 1 deal per type per team, max 4 total
@@ -1007,6 +1085,7 @@ function formatPlayer(p) {
     position: p.position,
     team: p.team,
     bfbValue: p.bfbValue ?? 0,
+    age: p.age ?? null,
   };
 }
 
@@ -1036,14 +1115,14 @@ function selectPickPackage(availablePicks, gap, otherSideLatePicks = [], usedPic
     (p) => !usedPickKeys.has(`${p.round}-${p.season}-${p.original_roster_id}`),
   );
 
-  // Strategy 1: Single anchor pick (80%-130% of gap)
-  const anchor = available.find((p) => p.pick_value >= gap * 0.8 && p.pick_value <= gap * 1.3);
+  // Strategy 1: Single anchor pick (widened to 70%-140% of gap)
+  const anchor = available.find((p) => p.pick_value >= gap * 0.7 && p.pick_value <= gap * 1.4);
   if (anchor) {
     return { givePicks: [anchor], receivePicks: [] };
   }
 
   // Strategy 2: Single pick that overshoots — get a late-round pick back as change
-  const overshooter = available.find((p) => p.pick_value > gap * 1.3 && p.pick_value <= gap * 2.5);
+  const overshooter = available.find((p) => p.pick_value > gap * 1.4 && p.pick_value <= gap * 2.5);
   if (overshooter && otherSideLatePicks.length > 0) {
     const overshoot = overshooter.pick_value - gap;
     const changePick = otherSideLatePicks.find(
@@ -1054,18 +1133,18 @@ function selectPickPackage(availablePicks, gap, otherSideLatePicks = [], usedPic
     }
   }
 
-  // Strategy 3: Fallback — greedy fill with consolidation penalty
+  // Strategy 3: Fallback — greedy fill with consolidation penalty (up to 3 picks, 50% threshold)
   let picksToInclude = [];
   let pickTotal = 0;
   for (const pick of available) {
     if (pickTotal >= gap * 1.1) break;
     picksToInclude.push(pick);
     pickTotal += pick.pick_value;
-    if (picksToInclude.length >= 2) break;
+    if (picksToInclude.length >= 3) break;
   }
 
   const discounted = applyConsolidationDiscount(pickTotal, picksToInclude.length);
-  if (picksToInclude.length > 0 && discounted >= gap * 0.6) {
+  if (picksToInclude.length > 0 && discounted >= gap * 0.5) {
     return { givePicks: picksToInclude, receivePicks: [] };
   }
 

@@ -43,6 +43,7 @@ function formatPlayer(p) {
     full_name: p.full_name || p.player_name || "Unknown",
     position: p.position,
     bfbValue: p.bfbValue ?? 0,
+    age: p.age ?? null,
   };
 }
 
@@ -81,10 +82,30 @@ function buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers =
     for (const pos of Object.keys(STARTER_COUNTS)) {
       byPos[pos] = keeperWorthy.filter((p) => p.position === pos);
     }
-    const needs = [];
+
+    // Tiered needs: criticalNeeds (no starter), upgradeNeeds (below-average starters)
+    const allKeeperWorthyForMedian = [...keeperWorthyIds].map((id) => playerMap[id]).filter(Boolean)
+      .sort((a, b) => (b.bfbValue ?? 0) - (a.bfbValue ?? 0));
+    const globalMedianVal = allKeeperWorthyForMedian.length > 0
+      ? (allKeeperWorthyForMedian[Math.floor(allKeeperWorthyForMedian.length / 2)]?.bfbValue ?? 0)
+      : 0;
+
+    const criticalNeeds = [];
+    const upgradeNeeds = [];
     for (const [pos, count] of Object.entries(STARTER_COUNTS)) {
-      if ((byPos[pos]?.length ?? 0) < count) needs.push(pos);
+      const posPlayers = byPos[pos] ?? [];
+      if (posPlayers.length === 0 || posPlayers.length < count) {
+        criticalNeeds.push(pos);
+      } else {
+        const posAvg = posPlayers.reduce((s, p) => s + (p.bfbValue ?? 0), 0) / posPlayers.length;
+        if (posAvg < globalMedianVal * 0.85) upgradeNeeds.push(pos);
+      }
     }
+    const needs = [...new Set([...criticalNeeds, ...upgradeNeeds])];
+
+    // Team mode from win record
+    const wins = roster.wins ?? 0;
+    const teamMode = wins >= 6 ? "contend" : wins < 4 ? "rebuild" : "neutral";
 
     return {
       roster_id: roster.roster_id,
@@ -93,6 +114,9 @@ function buildTeamAnalysis(rosters, playerMap, keeperWorthyIds, sleeperKeepers =
       keeperWorthy,
       surplus,
       needs,
+      criticalNeeds,
+      upgradeNeeds,
+      teamMode,
       byPos,
     };
   });
@@ -142,7 +166,13 @@ export async function generateTradeReport() {
     const slot = rosterToSlot[pick.original_roster_id] ?? 6;
     const yr = `'${String(pick.season).slice(2)}`;
     const slotStr = String(slot).padStart(2, "0");
-    return `${yr} ${pick.round}.${slotStr}`;
+    const tier =
+      pick.round === 1 && slot <= 3 ? " [elite]" :
+      pick.round === 1 && slot <= 6 ? " [top-half]" :
+      pick.round === 2 && slot <= 4 ? " [early-2nd]" :
+      pick.round === 2 ? " [2nd]" :
+      pick.round === 3 ? " [3rd]" : "";
+    return `${yr} ${pick.round}.${slotStr}${tier}`;
   };
 
   // 2. Generate recommended trades for every team
@@ -184,19 +214,19 @@ export async function generateTradeReport() {
             .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
             .sort((a, b) => a.pick_value - b.pick_value);
 
-          // Strategy 1: single anchor pick (80%-130% of gap)
+          // Strategy 1: single anchor pick (widened to 70%-140% of gap)
           const available = myTradePicks.filter(
             (p) => !usedUpgradePickKeys.has(`${p.round}-${p.season}-${p.original_roster_id}`),
           );
           let givePicks = [];
           let receivePicks = [];
 
-          const anchor = available.find((p) => p.pick_value >= gap * 0.8 && p.pick_value <= gap * 1.3);
+          const anchor = available.find((p) => p.pick_value >= gap * 0.7 && p.pick_value <= gap * 1.4);
           if (anchor) {
             givePicks = [anchor];
           } else {
             // Strategy 2: overshooter + change back
-            const overshooter = available.find((p) => p.pick_value > gap * 1.3 && p.pick_value <= gap * 2.5);
+            const overshooter = available.find((p) => p.pick_value > gap * 1.4 && p.pick_value <= gap * 2.5);
             if (overshooter && theirLatePicks.length > 0) {
               const overshoot = overshooter.pick_value - gap;
               const changePick = theirLatePicks.find(
@@ -207,17 +237,17 @@ export async function generateTradeReport() {
                 receivePicks = [changePick];
               }
             }
-            // Strategy 3: greedy fill with consolidation penalty
+            // Strategy 3: greedy fill with consolidation penalty (up to 3 picks, 50% threshold)
             if (givePicks.length === 0) {
               let pickTotal = 0;
               for (const pick of available) {
                 if (pickTotal >= gap * 1.1) break;
                 givePicks.push(pick);
                 pickTotal += pick.pick_value;
-                if (givePicks.length >= 2) break;
+                if (givePicks.length >= 3) break;
               }
               const discounted = applyConsolidationDiscount(pickTotal, givePicks.length);
-              if (givePicks.length === 0 || discounted < gap * 0.6) {
+              if (givePicks.length === 0 || discounted < gap * 0.5) {
                 givePicks = [];
               }
             }
@@ -226,9 +256,19 @@ export async function generateTradeReport() {
           if (givePicks.length > 0) {
             const givePickTotal = givePicks.reduce((s, p) => s + p.pick_value, 0);
             const receivePickTotal = receivePicks.reduce((s, p) => s + p.pick_value, 0);
+
+            // Age/timeline penalty: penalize acquiring older players, bonus for younger
+            const myAge = myPlayer.age ?? 27;
+            const targetAge = target.age ?? 27;
+            const ageDiff = targetAge - myAge;
+            let ageFactor = 1.0;
+            if (ageDiff >= 3) ageFactor = 0.85;       // acquiring 3+ years older: 15% penalty
+            else if (ageDiff <= -2) ageFactor = 1.10; // acquiring 2+ years younger: 10% bonus
+            const adjustedTargetVal = Math.round(targetVal * ageFactor);
+
             const fairness = computeRawFairness(
               [myVal], givePickTotal,
-              [targetVal], receivePickTotal,
+              [adjustedTargetVal], receivePickTotal,
             );
             const pickKeys = new Set(givePicks.map((p) => `${p.round}-${p.season}-${p.original_roster_id}`));
             for (const k of pickKeys) usedUpgradePickKeys.add(k);
@@ -309,6 +349,7 @@ export async function generateTradeReport() {
         }
       }
     }
+
   }
 
   // 3. Rank and deduplicate
