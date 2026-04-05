@@ -841,14 +841,16 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
             # (trajectory >= 0.85) — declining veterans past their positional
             # peak don't have prime years ahead and shouldn't get this boost.
             aging_trajectory = prod_curve[1] if len(prod_curve) > 1 else 0.0
-            # Prime floor requires production near replacement — 75% gate.
-            # 90% was too strict: a 23yo WR at 82% of replacement (e.g. MHJ with 9 elite
-            # years) was getting zero longevity credit, ranking below 30yo RBs with 0 elite
-            # years whose scarcity/durability manufactured a similar baseline.
-            # 75% still blocks true backups (Hunt at 67% of RB replacement fails) while
-            # allowing near-lineup young players to get credit for their ascending window.
+            # Prime floor requires production near replacement and pre-peak age.
+            # Post-peak players (e.g. Jennings at 28, WR peak=26) should not get longevity
+            # floor — they are declining, not ascending, and prime_discount handles them.
+            # Production gate is tiered by experience: rookies/2nd-year players get 75% gate
+            # (MHJ at 82% passes), but experienced players (years_exp >= 2) need 90%
+            # (Robinson at 3yrs/88% of replacement is blocked, Jennings at 3yrs also blocked).
             # elite_years=0 players (Hunt) get prime_floor=0 even if they pass the gate.
-            if longevity_score < 0.01 and elite_years >= 2 and aging_trajectory >= 0.85 and full_season_fp >= repl * 0.75:
+            _peak_age_for_floor = max(_curve, key=lambda a: _curve[a]) if _curve else 27
+            _floor_gate = repl * 0.75 if years_exp < 2 else repl * 0.90
+            if longevity_score < 0.05 and elite_years >= 2 and aging_trajectory >= 0.85 and full_season_fp >= _floor_gate and age < _peak_age_for_floor:
                 prime_floor = (elite_years / PROJECTION_YEARS) * 0.15
                 longevity_score = max(longevity_score, prime_floor)
         else:
@@ -948,12 +950,36 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         # This is forward-looking risk (will they return to form?) not a production penalty.
         # gp here is the raw most-recent season games — even if that season was filtered
         # out of the production calculation, the missed games still signal acquisition risk.
+        #
+        # Upgrade one tier when the player was producing at their normal rate before injury.
+        # If injury-season PPG >= 90% of the prior full-season PPG, the uncertainty is
+        # purely about availability (health), not production capability. The base thresholds
+        # assume we're unsure of both; this corrects for the "performing fine when healthy" case.
         if years_exp >= 1:
             return_multiplier = 0.75  # default: <6 games
             for threshold, multiplier in RETURN_UNCERTAINTY_THRESHOLDS:
                 if gp >= threshold:
                     return_multiplier = multiplier
                     break
+
+            # Check if player was at their production level before injury
+            if gp < 12:  # only relevant for meaningfully shortened seasons
+                inj_row = df[(df["player_name"] == name) & (df["season"] == latest_season)]
+                prior_row = df[(df["player_name"] == name) & (df["season"] == latest_season - 1)]
+                if not inj_row.empty and not prior_row.empty:
+                    inj_gp = pd.to_numeric(inj_row.iloc[0].get("games", 0), errors="coerce")
+                    inj_fp = inj_row.iloc[0].get("fantasy_points_half_ppr", 0)
+                    prior_gp = pd.to_numeric(prior_row.iloc[0].get("games", 0), errors="coerce")
+                    prior_fp = prior_row.iloc[0].get("fantasy_points_half_ppr", 0)
+                    if inj_gp >= 5 and prior_gp >= 13 and prior_fp > 0 and inj_fp > 0:
+                        inj_ppg = inj_fp / inj_gp
+                        prior_ppg = prior_fp / prior_gp
+                        if inj_ppg >= prior_ppg * 0.90:
+                            # Upgrade one tier — cap at the next threshold above current
+                            tiers = [m for (t, m) in RETURN_UNCERTAINTY_THRESHOLDS]
+                            idx = tiers.index(return_multiplier)
+                            return_multiplier = tiers[max(0, idx - 1)]
+
             composite *= return_multiplier
 
         # Chronic injury penalty: compound discount when a player has a PATTERN of
