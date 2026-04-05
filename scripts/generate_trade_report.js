@@ -311,7 +311,11 @@ export async function generateTradeReport() {
         if (surplusVal <= teamFloor && team.keeperWorthy.length >= KEEPER_SLOTS) continue;
 
         // effectiveVal = net gain for the buyer: player value minus who they'd have to drop.
-        const effectiveVal = Math.max(surplusVal - teamFloor, 0);
+        // Floor at 25% of the player's raw value so that a stacked buying team
+        // can't reduce a real starter's price to near-zero. Even if both teams
+        // are deep (small marginal gap), a starter-caliber player should command
+        // at minimum a late 3rd round pick rather than late-round picks.
+        const effectiveVal = Math.max(surplusVal - teamFloor, surplusVal * 0.25);
         if (effectiveVal <= 0) continue;
 
         const teamPicks = draftPicks.filter((p) => p.current_roster_id === team.roster_id);

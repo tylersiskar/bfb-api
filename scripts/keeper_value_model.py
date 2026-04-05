@@ -553,14 +553,46 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
     # Exclude low-game seasons — injury-shortened years shouldn't tank value.
     # Veterans (>3 years): drop seasons with <13 games.
     # Young players (<=3 years): drop seasons with <10 games — catches genuine
-    # injury-shortened half-seasons (e.g. LaPorta 9 games) while still keeping
-    # data for players who missed only a couple games. Nabers' 4-game season
-    # is also caught. Raising from 6 → 10 to be consistent with the 13-game
-    # veteran standard (~60-75% of a full season required for both groups).
+    # injury-shortened half-seasons while still keeping data for players who
+    # missed only a couple games. Nabers' 4-game season is also caught.
+    # Exception: the most recent season is kept if it has >= 8 games (~half season).
+    # This prevents elite PPG production from a partially-played latest season
+    # from being thrown away (e.g. Rice 2025: 8 games at 23 PPG is real signal).
+    # 8-game floor (not lower) ensures we're seeing a meaningful sample while
+    # excluding truly short stretches where the player may not have been healthy
+    # or productive enough to treat as current form (e.g. Wilson 2025: 7 games).
+    # The return_uncertainty penalty on the composite still discounts the player
+    # appropriately for the health risk.
+    # Compute latest season games before the injury filter (needed for protection logic)
+    _latest_season_row = player_seasons[player_seasons["season"] == latest_season]
+    _latest_gp = (
+        pd.to_numeric(_latest_season_row["games"].values[0], errors="coerce") or 0
+        if not _latest_season_row.empty else 0
+    )
+
+    # Only protect the latest short season if the player was actually producing well.
+    # Comparing latest PPG to prior full season PPG — if the player dropped below 80%
+    # of their prior form, the short season is a down stretch and should be excluded
+    # (e.g. LaPorta 2025: lower PPG than 2024 full season → don't protect, anchor to 2024).
+    # If PPG held up (e.g. Rice 2025: elite PPG) → protect (keep in calculation).
+    _protect_latest = _latest_gp >= 8  # default: protect if enough games
+    if _protect_latest and _latest_gp > 0:
+        _prior_row = player_seasons[player_seasons["season"] == latest_season - 1]
+        _latest_fp = _latest_season_row.iloc[0].get("fantasy_points_half_ppr", 0) if not _latest_season_row.empty else 0
+        if not _prior_row.empty and _latest_fp > 0:
+            _prior_gp = pd.to_numeric(_prior_row.iloc[0].get("games", 0), errors="coerce") or 0
+            _prior_fp = _prior_row.iloc[0].get("fantasy_points_half_ppr", 0)
+            if _prior_gp >= 10 and _prior_fp > 0:
+                _prior_ppg = _prior_fp / _prior_gp
+                _latest_ppg = _latest_fp / _latest_gp
+                if _latest_ppg < _prior_ppg * 0.80:
+                    _protect_latest = False  # short season was a down stretch — don't force it in
+
     if len(player_seasons) > 1:
         game_threshold = 13 if years_exp > 3 else 10
         full_seasons = player_seasons[
-            pd.to_numeric(player_seasons["games"], errors="coerce") >= game_threshold
+            (pd.to_numeric(player_seasons["games"], errors="coerce") >= game_threshold)
+            | ((player_seasons["season"] == latest_season) & _protect_latest)
         ]
         if len(full_seasons) >= 1:
             player_seasons = full_seasons
