@@ -2,7 +2,7 @@
 // Non-linear scaling so stars are worth exponentially more than role players.
 // This is the core mechanism preventing "4 mediocre guys = 1 star" trades.
 
-const ELITE_EXPONENT = 1.6;
+const ELITE_EXPONENT = 1.7;
 
 // ── Package Tax ──────────────────────────────────────────────────────────
 // Penalty applied to the side sending more assets in a trade.

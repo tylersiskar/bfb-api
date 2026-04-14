@@ -222,6 +222,17 @@ export async function generateTradeReport() {
           else if (ageDiff <= -2) ageFactor = 1.10;
           const adjustedTargetVal = Math.round(targetVal * ageFactor);
 
+          // Hard floor: the sending player must be worth at least 58% of the
+          // target's adjusted value.  Below this ratio the pick package needed
+          // to bridge the gap is so large that the "upgrade" framing becomes
+          // misleading — it's really a sell, not an upgrade trade.
+          // 58% means: CeeDee (0.494) requires sender >= 0.287 (Breece Hall tier);
+          //            Kyren  (0.473) requires sender >= 0.274 (Skattebo tier).
+          // Egbuka (0.264) / CeeDee (0.494) = 0.53 → filtered out.
+          // Chase Brown (0.370) / CeeDee (0.494) = 0.75 → passes, valid trade.
+          const VALUE_GAP_FLOOR = 0.58;
+          if (myVal < adjustedTargetVal * VALUE_GAP_FLOOR) continue;
+
           const gap = adjustedTargetVal - myVal;
 
           // Other team's late picks for "change back"
@@ -229,6 +240,20 @@ export async function generateTradeReport() {
             .filter((p) => p.current_roster_id === team.roster_id && p.round >= 3)
             .map((p) => ({ ...p, pick_value: rawPickValue(p) }))
             .sort((a, b) => a.pick_value - b.pick_value);
+
+          // Pick quality gate: for large value gaps (target > 130% of sender),
+          // require at least one Round 1 or Round 2 pick to be available.
+          // Prevents depth-pick stacks (3rd + 4th + 5th) from closing elite gaps —
+          // that's not a real trade, it's a loophole in the pick-strategy logic.
+          const isLargeGap = adjustedTargetVal > myVal * 1.30;
+          if (isLargeGap) {
+            const hasQualityPick = myTradePicks.some(
+              (p) =>
+                !usedUpgradePickKeys.has(`${p.round}-${p.season}-${p.original_roster_id}`) &&
+                p.round <= 2,
+            );
+            if (!hasQualityPick) continue;
+          }
 
           // Strategy 1: single anchor pick (widened to 70%-140% of gap)
           const available = myTradePicks.filter(
@@ -330,8 +355,8 @@ export async function generateTradeReport() {
 
         // Apply a seller's discount: surplus players trade at a haircut because the
         // seller is motivated and the buyer is taking on marginal roster risk.
-        // Targets R3/R4 picks rather than R2s for typical surplus deals.
-        const pickTargetVal = Math.round(effectiveVal * 0.75);
+        // 15% discount (was 25%) — prior haircut produced steals for buyers.
+        const pickTargetVal = Math.round(effectiveVal * 0.85);
 
         // Find the highest-valued pick that doesn't exceed the discounted target.
         const belowPicks = teamAnchorPicks.filter((p) => p.pick_value <= pickTargetVal);

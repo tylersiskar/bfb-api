@@ -39,8 +39,9 @@ STARTING_SLOTS = {**_BASE_STARTERS, "K": 1, "DEF": 1}
 
 # Exponent for the elite value curve.
 # Applied to normalized surplus so stars are worth exponentially more.
-# 1.0 = linear, 1.6 = moderate, 2.0 = aggressive
-ELITE_EXPONENT = 1.6
+# 1.0 = linear, 1.7 = steep (keeper-format), 2.0 = aggressive
+# Bumped from 1.6: elite WR1/RB1 talent can't be replicated by role players + picks
+ELITE_EXPONENT = 1.7
 
 # How much keeper/longevity value matters vs current production
 KEEPER_WEIGHT_IN_TRADE = 0.55
@@ -57,10 +58,10 @@ REPLACEMENT_LEVEL = {
 
 # Position-specific scarcity multipliers for the elite curve
 POS_MULTIPLIER = {
-    "QB":  0.95,   # keeper asset in 12-team league; raised from 0.85
-    "RB":  1.25,   # scarce + volatile + short prime = premium; lowered from 1.30 to align with keeper model
-    "WR":  0.95,   # slight discount vs RB scarcity (calibrated via trade history)
-    "TE":  1.10,   # elite TEs are rare
+    "QB":  1.00,   # calibration showed ~5% undervaluation; bumped from 0.95
+    "RB":  1.15,   # still premium but narrowed gap vs WR; calibration showed 8% overvaluation
+    "WR":  1.00,   # elite WRs are keeper cornerstones; bumped from 0.95 to match actual trade value
+    "TE":  1.05,   # slight elite TE premium; reduced from 1.10 per calibration
     "K":   0.30,   # fungible
     "DEF": 0.30,   # fungible
 }

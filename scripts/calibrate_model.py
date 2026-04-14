@@ -35,7 +35,7 @@ from keeper_value_model import (
     merge_bio_data,
     run_model_for_season,
 )
-from trade_calculator import get_pick_value
+from trade_calculator import get_pick_value, ELITE_EXPONENT, POS_MULTIPLIER, KEEPER_WEIGHT_IN_TRADE
 from league_config import POSITIONS
 from sleeper_api import (
     get_league_info, get_all_players as get_all_players_cached,
@@ -740,6 +740,14 @@ def save_corrections_json(pos_bias, recommendations):
     """Save machine-readable correction factors."""
     corrections = {
         "generated": datetime.now().isoformat(),
+        # Snapshot the exact model parameters used for this calibration run so
+        # reports are self-documenting and results from different tuning cycles
+        # can be compared without guessing which parameters were active.
+        "model_parameters": {
+            "elite_exponent": ELITE_EXPONENT,
+            "pos_multiplier": POS_MULTIPLIER,
+            "keeper_weight_in_trade": KEEPER_WEIGHT_IN_TRADE,
+        },
         "positional_bias": pos_bias,
         "positional_multipliers": {
             pos: data["implied_multiplier"]

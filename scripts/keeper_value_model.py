@@ -58,8 +58,8 @@ CHRONIC_INJURY_MULTIPLIER = 0.88      # additional ~12% discount
 
 # positional weights for composite score
 WEIGHTS = {
-    "current_season": 0.45,
-    "longevity":      0.37,
+    "current_season": 0.42,
+    "longevity":      0.40,
     "scarcity":       0.13,
     "durability":     0.05,
 }
@@ -361,6 +361,41 @@ def calculate_positional_scarcity(df, season):
 
     max_s = max(scarcity.values()) if scarcity else 1
     return {pos: round(v / max_s, 3) for pos, v in scarcity.items()}
+
+
+def load_sleeper_player_data(cache_path=None):
+    """
+    Load depth-chart and injury fields from the Sleeper players cache.
+
+    Returns a dict keyed by full_name:
+        {full_name: {"depth_chart_order": int|None,
+                     "injury_status":     str|None,
+                     "status":            str|None}}
+
+    Gracefully returns {} when the cache file is missing so the model
+    continues to work even without a fresh Sleeper sync.
+    """
+    if cache_path is None:
+        cache_path = os.path.join(OUTPUT_DIR, "sleeper_players_cache.json")
+    if not os.path.exists(cache_path):
+        return {}
+    try:
+        with open(cache_path) as f:
+            raw = json.load(f)
+    except Exception:
+        return {}
+    enrichment = {}
+    for _pid, p in raw.items():
+        name = p.get("full_name") or (
+            f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
+        )
+        if name:
+            enrichment[name] = {
+                "depth_chart_order": p.get("depth_chart_order"),
+                "injury_status":     p.get("injury_status"),
+                "status":            p.get("status"),
+            }
+    return enrichment
 
 
 def calculate_durability(df, player_name):
@@ -805,6 +840,24 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
             max_vor_by_pos[q["pos"]] = vor
     max_vor_global = max(max_vor_by_pos.values()) if max_vor_by_pos else 1
 
+    # ── Career top-5 positional VOR finishes (all loaded seasons)
+    # Counts how many seasons each player ranked top-5 at their position by
+    # fantasy points. Used downstream to apply a career-quality bonus that
+    # prevents a single down year from excessively tanking an established star.
+    # Uses all seasons already in `df` — no extra nflreadpy calls needed.
+    career_top5_counts: dict = defaultdict(int)
+    for _szn in df["season"].unique():
+        _szn_df = df[df["season"] == _szn]
+        for _pos in POSITIONS:
+            _pos_df = (
+                _szn_df[_szn_df["position"] == _pos]
+                .sort_values("fantasy_points_half_ppr", ascending=False)
+            )
+            for _rank_idx, _prow in enumerate(_pos_df.head(5).iterrows()):
+                _pname = _prow[1].get("player_name", "")
+                if _pname:
+                    career_top5_counts[_pname] += 1
+
     # ── Compute positional VOR ranks for elite tier bonus
     pos_vor_ranked = {}
     for pos in POSITIONS:
@@ -823,6 +876,10 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
     for pos in POSITIONS:
         pos_demand[pos] = STARTERS.get(pos, 0) + (flex_share if pos in FLEX_ELIGIBLE else 0)
     max_demand = max(pos_demand.values()) if pos_demand else 1
+
+    # Load Sleeper enrichment data once — depth chart roles + injury status.
+    # Falls back to {} silently if the cache is missing.
+    sleeper_data = load_sleeper_player_data()
 
     results = []
 
@@ -891,6 +948,21 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
         scarcity_score = scarcity.get(pos, 0.5)
         durability_score = calculate_durability(df, name)
 
+        # Sleeper depth-chart role multiplier: only confirmed starters deserve
+        # full positional scarcity credit.  Backups and depth players are
+        # replaceable in a way a feature back or WR1 is not.
+        # Falls back to no adjustment when Sleeper data is unavailable (None).
+        sleeper_info = sleeper_data.get(name, {})
+        _depth_order = sleeper_info.get("depth_chart_order")
+        if _depth_order is not None:
+            if _depth_order == 1:
+                _role_mult = 1.00   # confirmed starter — full scarcity
+            elif _depth_order == 2:
+                _role_mult = 0.80   # clear backup — discount scarcity
+            else:
+                _role_mult = 0.65   # depth / inactive — heavy discount
+            scarcity_score *= _role_mult
+
         # Scale scarcity and durability by production relative to replacement.
         # Scarcity rewards positional value in a keeper league, but only matters
         # if the player can actually fill a roster slot. A backup RB at 35% of
@@ -949,6 +1021,19 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
                 elite_bonus = 0.14 * demand_factor * (6 - pos_rank) / 4
             composite += elite_bonus
 
+        # Career quality bonus: established veterans with multiple historical top-5
+        # positional finishes get a small composite floor so that a single down year
+        # (injury, supporting cast regression) doesn't erase their proven pedigree.
+        # Gate: needs years_exp >= 4 to filter out fluky one-year wonders.
+        # Cap at +0.04 so even all-timers (JJ, CMC) don't get an outsized lift.
+        # Note: for CMC/Henry (elite_years == 0) the Phase-1a discount still dominates.
+        _top5 = career_top5_counts.get(name, 0)
+        if _top5 >= 2 and years_exp >= 4:
+            _career_bonus = min(_top5 * 0.012, 0.04)   # +0.012 per top-5 season, max +0.04
+            composite += _career_bonus
+        elif _top5 == 1 and years_exp >= 4:
+            composite += 0.008
+
         # Positional keeper premium: RBs have shorter prime windows than WRs/QBs,
         # so each elite RB year is worth more as a keeper asset. This premium
         # is calibrated from historical trade data showing RBs undervalued by
@@ -978,6 +1063,19 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
             prime_discount *= past_peak_multiplier
             composite *= prime_discount
 
+        # Zero / minimal elite-year explicit discount.
+        # The prime_discount above models the aging-curve decline, but a player
+        # with elite_years == 0 has already exhausted their keeper window entirely —
+        # they are a win-now rental, not a long-term keeper asset.  Apply an
+        # additional haircut so they cannot occupy keeper slots ahead of players
+        # who still have multiple elite seasons ahead of them.
+        # Only fires when the prime_discount block did NOT already run (i.e. the
+        # player is still pre-peak), to avoid double-penalising post-peak zeros.
+        if elite_years == 0:
+            composite *= 0.88   # ~12% extra haircut: CMC, Henry, Kelce tier
+        elif elite_years == 1:
+            composite *= 0.94   # ~6% haircut: one year left still has value
+
         # Return uncertainty: penalize players whose most recent season had low game counts.
         # This is forward-looking risk (will they return to form?) not a production penalty.
         # gp here is the raw most-recent season games — even if that season was filtered
@@ -993,6 +1091,17 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
                 if gp >= threshold:
                     return_multiplier = multiplier
                     break
+
+            # Sleeper injury status override: current-status signals from Sleeper
+            # can be more up-to-date than historical games-played counts alone.
+            # "IR" / "PUP" forces worst-case uncertainty regardless of GP, because
+            # the player is formally designated as unavailable.
+            # "Out" / "Doubtful" caps the multiplier at the 6-8 GP tier (0.83).
+            _sleeper_injury = sleeper_info.get("injury_status")
+            if _sleeper_injury in ("IR", "PUP"):
+                return_multiplier = 0.75   # force worst-case tier
+            elif _sleeper_injury in ("Out", "Doubtful"):
+                return_multiplier = min(return_multiplier, 0.83)
 
             # Check if player was at their production level before injury
             if gp < 12:  # only relevant for meaningfully shortened seasons
