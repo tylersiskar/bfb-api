@@ -1,7 +1,6 @@
 import { getRostersWithOwners, getPlayersByIds, getSkillPlayersByIds, getDraftPicksByLeague } from "../db.js";
 import {
   getPickValue,
-  calculateTradeValue,
   applyEliteCurve,
   applyConsolidationDiscount,
 } from "../utils/calculations.js";
@@ -104,23 +103,20 @@ export const calculateTrade = async (req, res) => {
     // ── JS-based value calculation (always runs as baseline) ──
 
     const tradeValue = (id) => playerMap[id]?.bfbValue ?? 0;
-    const sortedValues = (ids) => ids.map(tradeValue).sort((a, b) => b - a);
 
-    const aPlayerValues = sortedValues(side_a.players ?? []);
-    const bPlayerValues = sortedValues(side_b.players ?? []);
+    const aPlayerValues = (side_a.players ?? []).map(tradeValue);
+    const bPlayerValues = (side_b.players ?? []).map(tradeValue);
 
     const aPickVal = sidePickValue(side_a.picks);
     const bPickVal = sidePickValue(side_b.picks);
 
-    const bTotalAssets = (side_b.players ?? []).length + (side_b.picks ?? []).length;
-    const aTotalAssets = (side_a.players ?? []).length + (side_a.picks ?? []).length;
-
-    const aSide = calculateTradeValue(aPlayerValues, aPickVal, bTotalAssets);
-    const bSide = calculateTradeValue(bPlayerValues, bPickVal, aTotalAssets);
+    // Raw sums — no elite curve, no package tax
+    const aRaw = aPlayerValues.reduce((s, v) => s + v, 0) + aPickVal;
+    const bRaw = bPlayerValues.reduce((s, v) => s + v, 0) + bPickVal;
 
     // Fairness: 50 = perfectly fair, >50 = side A giving more, <50 = side B giving more
-    const totalValue = aSide.total + bSide.total || 1;
-    const fairness = Math.round((aSide.total / totalValue) * 100);
+    const totalValue = aRaw + bRaw || 1;
+    const fairness = Math.round((aRaw / totalValue) * 100);
 
     const margin =
       Math.abs(fairness - 50) < 5
@@ -139,14 +135,10 @@ export const calculateTrade = async (req, res) => {
       winner,
       margin,
       breakdown: {
-        side_a_value: aSide.total,
-        side_b_value: bSide.total,
-        side_a_raw_value: aSide.rawTotal,
-        side_b_raw_value: bSide.rawTotal,
+        side_a_value: aRaw,
+        side_b_value: bRaw,
         side_a_picks_value: aPickVal,
         side_b_picks_value: bPickVal,
-        side_a_tax: aSide.taxApplied ? aSide.taxRate : 0,
-        side_b_tax: bSide.taxApplied ? bSide.taxRate : 0,
       },
       players: withValues.map((p) => ({
         id: p.id,
@@ -1183,14 +1175,10 @@ function selectPickPackage(availablePicks, gap, otherSideLatePicks = [], usedPic
   return { givePicks: [], receivePicks: [] };
 }
 
-// Mirrors calculateTrade's fairness math: each side normalizes its elite curve
-// against its own max so the deal-card slider matches the trade-calculator slider
-// for the same set of assets.
-function computeFairness(aValues, aPickVal, bAssetCount, bValues, bPickVal, aAssetCount) {
-  const aSide = calculateTradeValue(aValues, aPickVal, bAssetCount);
-  const bSide = calculateTradeValue(bValues, bPickVal, aAssetCount);
-  const total = aSide.total + bSide.total || 1;
-  return Math.round((aSide.total / total) * 100);
+// Raw-sum fairness: matches the trade calculator's slider (no elite curve, no package tax).
+// The deal-card slider and the calculator slider now agree on the same value comparison.
+function computeFairness(aValues, aPickVal, _bAssetCount, bValues, bPickVal, _aAssetCount) {
+  return computeRawFairness(aValues, aPickVal, bValues, bPickVal);
 }
 
 // Raw fairness: straight sum comparison without elite curve or package tax.
