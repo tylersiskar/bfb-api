@@ -1183,10 +1183,12 @@ function selectPickPackage(availablePicks, gap, otherSideLatePicks = [], usedPic
   return { givePicks: [], receivePicks: [] };
 }
 
+// Mirrors calculateTrade's fairness math: each side normalizes its elite curve
+// against its own max so the deal-card slider matches the trade-calculator slider
+// for the same set of assets.
 function computeFairness(aValues, aPickVal, bAssetCount, bValues, bPickVal, aAssetCount) {
-  const globalMax = Math.max(...aValues, aPickVal, ...bValues, bPickVal, 1);
-  const aSide = calculateTradeValue(aValues, aPickVal, bAssetCount, globalMax);
-  const bSide = calculateTradeValue(bValues, bPickVal, aAssetCount, globalMax);
+  const aSide = calculateTradeValue(aValues, aPickVal, bAssetCount);
+  const bSide = calculateTradeValue(bValues, bPickVal, aAssetCount);
   const total = aSide.total + bSide.total || 1;
   return Math.round((aSide.total / total) * 100);
 }
