@@ -997,36 +997,68 @@ export const findDeals = async (req, res) => {
     }
 
     // 6b. Bilateral surplus swaps — "I have surplus RB, you have surplus WR, we both fill a hole"
-    // This deal type is not generated elsewhere; it's the most common mutually-beneficial keeper trade.
+    // Always anchored to the searched player: must give or receive selectedPlayer.
     if (myTeam) {
       const COMPLEMENT_MAP = { RB: ["WR", "TE"], WR: ["RB", "TE"], TE: ["RB", "WR"], QB: ["WR"] };
-      for (const mySurplusPlayer of myTeam.surplus) {
-        const myPos = mySurplusPlayer.position;
-        const myVal = mySurplusPlayer.bfbValue ?? 0;
-        const compPositions = COMPLEMENT_MAP[myPos] ?? [];
 
-        for (const team of teams) {
-          if (team.roster_id === parseInt(roster_id)) continue;
-          if (!team.needs.includes(myPos)) continue;
+      if (isSelling) {
+        const isSelectedSurplus = myTeam.surplus.some((p) => p.id === player_id);
+        if (isSelectedSurplus) {
+          const myPos = selectedPlayer.position;
+          const myVal = selectedValue;
+          const compPositions = COMPLEMENT_MAP[myPos] ?? [];
 
-          const theirMatch = team.surplus.find(
+          for (const team of teams) {
+            if (team.roster_id === parseInt(roster_id)) continue;
+            if (!team.needs.includes(myPos)) continue;
+
+            const theirMatch = team.surplus.find(
+              (p) =>
+                compPositions.includes(p.position) &&
+                (p.bfbValue ?? 0) >= myVal * 0.7 &&
+                (p.bfbValue ?? 0) <= myVal * 1.3,
+            );
+            if (!theirMatch) continue;
+
+            const fairness = computeFairness([myVal], 0, 1, [theirMatch.bfbValue ?? 0], 0, 1);
+            deals.push({
+              target_team: { roster_id: team.roster_id, display_name: team.display_name },
+              type: "bilateral_surplus_swap",
+              give: { players: [formatPlayer(selectedPlayer)], picks: [] },
+              receive: { players: [formatPlayer(theirMatch)], picks: [] },
+              fairness,
+              rationale: `Surplus swap: send ${myPos}, receive ${theirMatch.position}${myTeam.needs.includes(theirMatch.position) ? " (fills your need)" : ""}`,
+            });
+            break;
+          }
+        }
+      } else {
+        const targetTeam = teams.find((t) => t.roster_id === ownerRosterId);
+        if (targetTeam && targetTeam.surplus.some((p) => p.id === player_id)) {
+          const theirPos = selectedPlayer.position;
+          const theirVal = selectedValue;
+          const myComplementPositions = Object.entries(COMPLEMENT_MAP)
+            .filter(([, comps]) => comps.includes(theirPos))
+            .map(([pos]) => pos);
+
+          const myMatch = myTeam.surplus.find(
             (p) =>
-              compPositions.includes(p.position) &&
-              (p.bfbValue ?? 0) >= myVal * 0.7 &&
-              (p.bfbValue ?? 0) <= myVal * 1.3,
+              myComplementPositions.includes(p.position) &&
+              targetTeam.needs.includes(p.position) &&
+              (p.bfbValue ?? 0) >= theirVal * 0.7 &&
+              (p.bfbValue ?? 0) <= theirVal * 1.3,
           );
-          if (!theirMatch) continue;
-
-          const fairness = computeFairness([myVal], 0, 1, [theirMatch.bfbValue ?? 0], 0, 1);
-          deals.push({
-            target_team: { roster_id: team.roster_id, display_name: team.display_name },
-            type: "bilateral_surplus_swap",
-            give: { players: [formatPlayer(mySurplusPlayer)], picks: [] },
-            receive: { players: [formatPlayer(theirMatch)], picks: [] },
-            fairness,
-            rationale: `Surplus swap: send ${myPos}, receive ${theirMatch.position}${myTeam.needs.includes(theirMatch.position) ? " (fills your need)" : ""}`,
-          });
-          break;
+          if (myMatch) {
+            const fairness = computeFairness([myMatch.bfbValue ?? 0], 0, 1, [theirVal], 0, 1);
+            deals.push({
+              target_team: { roster_id: targetTeam.roster_id, display_name: targetTeam.display_name },
+              type: "bilateral_surplus_swap",
+              give: { players: [formatPlayer(myMatch)], picks: [] },
+              receive: { players: [formatPlayer(selectedPlayer)], picks: [] },
+              fairness,
+              rationale: `Surplus swap: send ${myMatch.position}, receive ${theirPos}${myTeam.needs.includes(theirPos) ? " (fills your need)" : ""}`,
+            });
+          }
         }
       }
     }
