@@ -447,6 +447,17 @@ DRAFT_POS_MULTIPLIER = {"QB": 0.75, "RB": 1.15, "WR": 1.10, "TE": 0.80}
 # Cap on draft capital score — unproven players shouldn't outscore producers
 DRAFT_CAPITAL_CAP = 0.40
 
+# Power-curve exponent applied to normalized draft capital base scores.
+# Exponent > 1 steepens the value dropoff for mid/late picks while keeping
+# top picks near full value.  Example with exponent=1.5:
+#   Pick  #1 (base=1.00) → 1.00   (unchanged)
+#   Pick  #5 (base=0.72) → 0.61   (−15%)
+#   Pick #15 (base=0.50) → 0.35   (−30%)
+#   Pick #30 (base=0.35) → 0.20   (−41%)
+#   Pick #50 (base=0.24) → 0.12   (−52%)
+#   Pick#100 (base=0.14) → 0.05   (−65%)
+ROOKIE_DRAFT_CURVE_EXPONENT = 1.5
+
 
 def calculate_draft_capital_score(player_row, draft_value_lookup, latest_season):
     """
@@ -473,6 +484,10 @@ def calculate_draft_capital_score(player_row, draft_value_lookup, latest_season)
         round_num = int(draft_round)
         estimated_pick = (round_num - 1) * 32 + 16
         base_score = draft_value_lookup.get(estimated_pick, max(0, 0.15 - round_num * 0.02))
+
+    # Apply power curve: steepens the value dropoff for mid/late picks while
+    # leaving top picks (near 1.0) essentially unchanged.
+    base_score = base_score ** ROOKIE_DRAFT_CURVE_EXPONENT
 
     pos_mult = DRAFT_POS_MULTIPLIER.get(position, 1.0)
 
