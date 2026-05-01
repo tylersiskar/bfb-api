@@ -746,13 +746,7 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
             if not pd.isna(lr_gp) and lr_gp >= 1 and lr_fp > 0:
                 effective_ppg = lr_fp / lr_gp
 
-        if years_exp <= 3:
-            # Young players: floor at 90% of effective latest season PPG — trust recent proof
-            weighted_ppg = max(weighted_ppg, effective_ppg * 0.90, best_ppg * 0.80)
-        else:
-            # Veterans: floor at effective latest season PPG so good recent form isn't buried
-            # by prior average seasons (especially relevant for 0.5 PPR pocket passers)
-            weighted_ppg = max(weighted_ppg, effective_ppg, best_ppg * 0.80)
+        weighted_ppg = max(weighted_ppg, effective_ppg, best_ppg * 0.80)
 
     return weighted_ppg * 17, effective_gp
 

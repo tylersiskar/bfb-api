@@ -274,16 +274,15 @@ function startCronJobs() {
   const leagueId = process.env.LEAGUE_ID;
 
   // Daily midnight — keep rosters/picks fresh
-  // cron.schedule("0 0 * * *", async () => {
-  //   console.log("[cron] Running nightly league sync...");
-  //   try {
-  //     await syncLeague(leagueId);
-  //     await sendGroupMe("Nightly league sync complete.");
-  //   } catch (err) {
-  //     console.error("[cron] League sync error:", err);
-  //     await sendGroupMe(`Nightly league sync FAILED: ${err.message}`);
-  //   }
-  // });
+  cron.schedule("0 0 * * *", async () => {
+    console.log("[cron] Running nightly league sync...");
+    try {
+      await syncLeague(leagueId);
+    } catch (err) {
+      console.error("[cron] League sync error:", err);
+      await sendGroupMe(`Nightly league sync FAILED: ${err.message}`);
+    }
+  });
 
   // Daily 10:45pm EDT (2:45am UTC) — update player stats, NFL players, and KTC values
   cron.schedule("45 2 * * 3", async () => {

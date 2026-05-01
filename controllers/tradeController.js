@@ -32,10 +32,32 @@ export const calculateTrade = async (req, res) => {
     const { side_a, side_b, league_id } = req.body;
     const year = parseInt(req.query.year) || new Date().getFullYear();
 
-    const allPlayerIds = [...(side_a.players ?? []), ...(side_b.players ?? [])];
-    const players = await getPlayersByIds(allPlayerIds, year);
+    // Enrich against the full league pool so bfbValue is stable.
+    // enrichWithKeeperValues scales values off the max KTC in the passed-in set;
+    // if we only enrich 2 trade players, that max is tiny and everyone's value
+    // drops relative to what findDeals / getAllPlayers compute for the same player.
+    const rosters = league_id ? await getRostersWithOwners(league_id) : [];
+    const leaguePlayerIds = [
+      ...new Set([
+        ...rosters.flatMap((r) => r.player_ids ?? []),
+        ...(side_a.players ?? []),
+        ...(side_b.players ?? []),
+      ]),
+    ];
+    const players = leaguePlayerIds.length
+      ? await getPlayersByIds(leaguePlayerIds, year)
+      : await getPlayersByIds(
+          [...(side_a.players ?? []), ...(side_b.players ?? [])],
+          year,
+        );
 
-    const { withValues, playerMap } = enrichPlayers(players);
+    const { playerMap } = enrichPlayers(players);
+
+    // Narrow to just the players actually in this trade for the response payload
+    const tradePlayerIds = [...(side_a.players ?? []), ...(side_b.players ?? [])];
+    const withValues = tradePlayerIds
+      .map((id) => playerMap[id])
+      .filter(Boolean);
 
     // Pick slot map — uses real draft order (offseason) or standings (in-season)
     const { rosterToSlot } = league_id
@@ -60,20 +82,16 @@ export const calculateTrade = async (req, res) => {
     // If we have rosters for both sides, run full Python analysis
     let advancedAnalysis = null;
     if (league_id && side_a.roster_id && side_b.roster_id) {
-      const rosters = await getRostersWithOwners(league_id);
       const aRoster = rosters.find((r) => r.roster_id === parseInt(side_a.roster_id));
       const bRoster = rosters.find((r) => r.roster_id === parseInt(side_b.roster_id));
 
       if (aRoster && bRoster) {
         const aAllIds = aRoster.player_ids ?? [];
         const bAllIds = bRoster.player_ids ?? [];
-        const allRosterIds = [...new Set([...aAllIds, ...bAllIds])];
 
-        const rosterPlayers = await getPlayersByIds(allRosterIds, year);
-        const { playerMap: rosterPlayerMap } = enrichPlayers(rosterPlayers);
-
-        const aFullRoster = toTradeRoster(aAllIds.map((id) => rosterPlayerMap[id]).filter(Boolean));
-        const bFullRoster = toTradeRoster(bAllIds.map((id) => rosterPlayerMap[id]).filter(Boolean));
+        // Reuse the league-wide playerMap instead of re-enriching a narrow slice
+        const aFullRoster = toTradeRoster(aAllIds.map((id) => playerMap[id]).filter(Boolean));
+        const bFullRoster = toTradeRoster(bAllIds.map((id) => playerMap[id]).filter(Boolean));
 
         try {
           advancedAnalysis = await runTradeBridge({
