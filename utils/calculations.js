@@ -52,14 +52,17 @@ const LEAGUE_SIZE = 12;
 // Per-slot values for rounds 1-3 (slots 1-12). Index 0 = slot 1.
 // Scaled to sit below elite player values — in a keeper league the draft
 // pool is the ~97th+ best players, so picks shouldn't rival top assets.
+// R3 retuned: prior values (250-450) let a single 3rd close real upgrade gaps
+// (e.g. mid-QB1 + 3rd ≈ elite QB1). R3 picks are dart throws on pick 25-36 of
+// the available pool and should be priced accordingly.
 const ROUND_1_VALUES = [7500, 5200, 5000, 4800, 4600, 3900, 3500, 3100, 2700, 2400, 2100, 1900];
 const ROUND_2_VALUES = [1800, 1650, 1500, 1400, 1300, 1150, 1000, 850, 725, 650, 575, 500];
-const ROUND_3_VALUES = [450, 425, 400, 385, 370, 350, 325, 300, 280, 265, 255, 250];
+const ROUND_3_VALUES = [300, 275, 250, 225, 200, 180, 165, 150, 140, 130, 120, 110];
 
 const PICK_ROUND_VALUES = { 1: ROUND_1_VALUES, 2: ROUND_2_VALUES, 3: ROUND_3_VALUES };
 
 // Flat per-round values for rounds 4-8
-const LATE_ROUND_VALUES = { 4: 200, 5: 150, 6: 100, 7: 75, 8: 50 };
+const LATE_ROUND_VALUES = { 4: 100, 5: 70, 6: 50, 7: 35, 8: 25 };
 
 // teamStrength: "early" | "mid" | "late" — adjusts unresolved future picks by ±15%
 //   based on the originating team's expected draft position. Ignored for current-year picks.

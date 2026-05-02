@@ -98,13 +98,15 @@ LEAGUE_SIZE = 12
 
 # Per-slot values for rounds 1-3 (index 0 = slot 1). Mirrors calculations.js.
 # Scaled below elite player values — keeper league draft pool is ~97th+ best.
+# R3 retuned: prior values (250-450) let a single 3rd close real upgrade gaps.
+# R3 picks are dart throws on pick 25-36 of the available pool.
 ROUND_1_VALUES = [6000, 5200, 5000, 4800, 4000, 3800, 3600, 3400, 3100, 2800, 2400, 2050]
 ROUND_2_VALUES = [1800, 1650, 1500, 1400, 1300, 1150, 1000, 850, 725, 650, 575, 500]
-ROUND_3_VALUES = [450, 425, 400, 385, 370, 350, 325, 300, 280, 265, 255, 250]
+ROUND_3_VALUES = [300, 275, 250, 225, 200, 180, 165, 150, 140, 130, 120, 110]
 
 PICK_ROUND_VALUES = {1: ROUND_1_VALUES, 2: ROUND_2_VALUES, 3: ROUND_3_VALUES}
 
-LATE_ROUND_VALUES = {4: 200, 5: 150, 6: 100, 7: 75, 8: 50}
+LATE_ROUND_VALUES = {4: 100, 5: 70, 6: 50, 7: 35, 8: 25}
 
 # Consolidation discount: multiple picks combined to match one are worth less.
 CONSOLIDATION_DISCOUNT = {1: 1.0, 2: 0.85, 3: 0.70}

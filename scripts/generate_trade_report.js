@@ -8,7 +8,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getRostersWithOwners, getSkillPlayersByIds, getDraftPicksByLeague } from "../db.js";
-import { getPickValue, applyConsolidationDiscount } from "../utils/calculations.js";
+import { getPickValue, applyConsolidationDiscount, getPackageTax } from "../utils/calculations.js";
 import { getPickSlotMap } from "../utils/pickSlots.js";
 import { enrichPlayers, getKeeperWorthyIds, fetchSleeperKeepers } from "../utils/league.js";
 
@@ -30,11 +30,26 @@ function shortName(fullName) {
   return `${parts[0][0]}. ${last}`;
 }
 
-function computeRawFairness(aValues, aPickVal, bValues, bPickVal) {
-  const aTotal = aValues.reduce((s, v) => s + v, 0) + aPickVal;
-  const bTotal = bValues.reduce((s, v) => s + v, 0) + bPickVal;
+function computeRawFairness(aValues, aPickVal, bValues, bPickVal, aPickCount = 0, bPickCount = 0) {
+  let aTotal = aValues.reduce((s, v) => s + v, 0) + aPickVal;
+  let bTotal = bValues.reduce((s, v) => s + v, 0) + bPickVal;
+  const aAssets = aValues.length + aPickCount;
+  const bAssets = bValues.length + bPickCount;
+  const taxRate = getPackageTax(aAssets - bAssets);
+  if (aAssets > bAssets) aTotal *= 1 - taxRate;
+  else if (bAssets > aAssets) bTotal *= 1 - taxRate;
   const total = aTotal + bTotal || 1;
   return Math.round((aTotal / total) * 100);
+}
+
+// Pick value required to bridge a value gap after package tax is applied to
+// the heavier side. Tax depends on asset-count difference between sides.
+//   (myVal + picks) * (1 - tax) = targetVal  →  picks = targetVal / (1 - tax) - myVal
+function taxedGapForPickCount(myVal, targetVal, givePickCount, receivePickCount = 0) {
+  const aAssets = 1 + givePickCount;        // myTeam: 1 player + N picks
+  const bAssets = 1 + receivePickCount;     // targetTeam: 1 player + M picks
+  const tax = getPackageTax(aAssets - bAssets);
+  return targetVal / (1 - tax) - myVal;
 }
 
 function formatPlayer(p) {
@@ -255,18 +270,20 @@ export async function generateTradeReport() {
             if (!hasQualityPick) continue;
           }
 
-          // Strategy 1: single anchor pick (widened to 70%-140% of gap)
+          // Strategy 1: single anchor pick (asset_diff = +1 for myTeam → 10% tax).
+          // Anchor must bridge the tax-grossed gap, widened to 70%-140%.
           const available = myTradePicks.filter(
             (p) => !usedUpgradePickKeys.has(`${p.round}-${p.season}-${p.original_roster_id}`),
           );
           let givePicks = [];
           let receivePicks = [];
 
-          const anchor = available.find((p) => p.pick_value >= gap * 0.7 && p.pick_value <= gap * 1.4);
+          const gap1 = taxedGapForPickCount(myVal, adjustedTargetVal, 1, 0);
+          const anchor = available.find((p) => p.pick_value >= gap1 * 0.7 && p.pick_value <= gap1 * 1.4);
           if (anchor) {
             givePicks = [anchor];
           } else {
-            // Strategy 2: overshooter + change back
+            // Strategy 2: overshooter + change back (1+1 vs 1+1 → asset_diff = 0, no tax)
             const overshooter = available.find((p) => p.pick_value > gap * 1.4 && p.pick_value <= gap * 2.5);
             if (overshooter && theirLatePicks.length > 0) {
               const overshoot = overshooter.pick_value - gap;
@@ -278,18 +295,21 @@ export async function generateTradeReport() {
                 receivePicks = [changePick];
               }
             }
-            // Strategy 3: greedy fill with consolidation penalty (up to 3 picks, 50% threshold)
+            // Strategy 3: greedy fill with consolidation penalty + per-count tax (up to 3 picks)
             if (givePicks.length === 0) {
               let pickTotal = 0;
+              const trial = [];
               for (const pick of available) {
-                if (pickTotal >= gap * 1.1) break;
-                givePicks.push(pick);
+                trial.push(pick);
                 pickTotal += pick.pick_value;
-                if (givePicks.length >= 3) break;
-              }
-              const discounted = applyConsolidationDiscount(pickTotal, givePicks.length);
-              if (givePicks.length === 0 || discounted < gap * 0.5) {
-                givePicks = [];
+                const count = trial.length;
+                const gapTaxed = taxedGapForPickCount(myVal, adjustedTargetVal, count, 0);
+                const discounted = applyConsolidationDiscount(pickTotal, count);
+                if (discounted >= gapTaxed * 0.5 && discounted <= gapTaxed * 1.4) {
+                  givePicks = [...trial];
+                  break;
+                }
+                if (count >= 3) break;
               }
             }
           }
@@ -301,6 +321,7 @@ export async function generateTradeReport() {
             const fairness = computeRawFairness(
               [myVal], givePickTotal,
               [adjustedTargetVal], receivePickTotal,
+              givePicks.length, receivePicks.length,
             );
             const pickKeys = new Set(givePicks.map((p) => `${p.round}-${p.season}-${p.original_roster_id}`));
             for (const k of pickKeys) usedUpgradePickKeys.add(k);
@@ -379,6 +400,7 @@ export async function generateTradeReport() {
           const fairness = computeRawFairness(
             [effectiveVal], givePicks.reduce((s, p) => s + rawPickValue(p), 0),
             [], anchor.pick_value,
+            givePicks.length, 1,
           );
 
           allSurplus.push({
@@ -447,23 +469,8 @@ export async function generateTradeReport() {
     w("");
   }
 
-  w("");
-  w("SURPLUS DEALS");
-  w("");
-
-  if (topSurplus.length > 0) {
-    for (const deal of topSurplus) {
-      w(`${deal.from} sends:`);
-      w(`  ${shortName(deal.give.player.full_name)} (${deal.give.player.position})`);
-      for (const pick of deal.give.picks) w(`  ${pickLabel(pick)}`);
-      w(`${deal.to} sends:`);
-      for (const pick of deal.receive.picks) w(`  ${pickLabel(pick)}`);
-      w("----------");
-    }
-  } else {
-    w("  No surplus deals found.");
-    w("");
-  }
+  // SURPLUS DEALS section hidden — surplus-for-late-pick deals weren't generating
+  // interesting weekly content. Logic still runs above so it's easy to re-enable.
 
   const report = lines.join("\n") + "\n";
 
