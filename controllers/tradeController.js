@@ -4,6 +4,7 @@ import {
   calculateTradeValue,
   applyEliteCurve,
   applyConsolidationDiscount,
+  getPackageTax,
 } from "../utils/calculations.js";
 import { getPickSlotMap } from "../utils/pickSlots.js";
 import { runTradeBridge } from "../utils/pythonBridge.js";
@@ -1163,18 +1164,29 @@ function formatPick(pick, rosterToSlot) {
  * @param {Set} [usedPickKeys] - picks already committed in other deals
  * @returns {{ givePicks, receivePicks }} - picks to send and receive (change back)
  */
-function selectPickPackage(availablePicks, gap, otherSideLatePicks = [], usedPickKeys = new Set()) {
+function selectPickPackage(availablePicks, gap, otherSideLatePicks = [], usedPickKeys = new Set(), myVal = 0, targetVal = 0) {
   const available = availablePicks.filter(
     (p) => !usedPickKeys.has(`${p.round}-${p.season}-${p.original_roster_id}`),
   );
 
-  // Strategy 1: Single anchor pick (widened to 70%-140% of gap)
-  const anchor = available.find((p) => p.pick_value >= gap * 0.7 && p.pick_value <= gap * 1.4);
+  // Pick value required to bridge the gap after package tax is applied to the
+  // heavier (myTeam) side. (myVal + picks) * (1 - tax) = targetVal
+  // Falls back to plain gap when caller didn't pass values (legacy callers).
+  const taxedGap = (giveCount, receiveCount = 0) => {
+    if (!targetVal) return gap;
+    const assetDiff = (1 + giveCount) - (1 + receiveCount);
+    const tax = getPackageTax(assetDiff);
+    return targetVal / (1 - tax) - myVal;
+  };
+
+  // Strategy 1: Single anchor pick (asset_diff = +1 → 10% tax on myTeam)
+  const gap1 = taxedGap(1, 0);
+  const anchor = available.find((p) => p.pick_value >= gap1 * 0.7 && p.pick_value <= gap1 * 1.4);
   if (anchor) {
     return { givePicks: [anchor], receivePicks: [] };
   }
 
-  // Strategy 2: Single pick that overshoots — get a late-round pick back as change
+  // Strategy 2: Overshoot + change back (1+1 vs 1+1 → asset_diff = 0, no tax)
   const overshooter = available.find((p) => p.pick_value > gap * 1.4 && p.pick_value <= gap * 2.5);
   if (overshooter && otherSideLatePicks.length > 0) {
     const overshoot = overshooter.pick_value - gap;
@@ -1186,19 +1198,19 @@ function selectPickPackage(availablePicks, gap, otherSideLatePicks = [], usedPic
     }
   }
 
-  // Strategy 3: Fallback — greedy fill with consolidation penalty (up to 3 picks, 50% threshold)
-  let picksToInclude = [];
+  // Strategy 3: Greedy fill with consolidation penalty + per-count tax (up to 3 picks)
+  const picksToInclude = [];
   let pickTotal = 0;
   for (const pick of available) {
-    if (pickTotal >= gap * 1.1) break;
     picksToInclude.push(pick);
     pickTotal += pick.pick_value;
-    if (picksToInclude.length >= 3) break;
-  }
-
-  const discounted = applyConsolidationDiscount(pickTotal, picksToInclude.length);
-  if (picksToInclude.length > 0 && discounted >= gap * 0.5) {
-    return { givePicks: picksToInclude, receivePicks: [] };
+    const count = picksToInclude.length;
+    const gapTaxed = taxedGap(count, 0);
+    const discounted = applyConsolidationDiscount(pickTotal, count);
+    if (discounted >= gapTaxed * 0.5 && discounted <= gapTaxed * 1.4) {
+      return { givePicks: [...picksToInclude], receivePicks: [] };
+    }
+    if (count >= 3) break;
   }
 
   return { givePicks: [], receivePicks: [] };
@@ -1213,12 +1225,17 @@ function computeFairness(aValues, aPickVal, bAssetCount, bValues, bPickVal, aAss
   return Math.round((aSide.total / total) * 100);
 }
 
-// Raw fairness: straight sum comparison without elite curve or package tax.
-// Used for recommended trade filtering where the curved metric is misleading
-// (multi-asset sides always look cheaper due to non-linear scaling + tax).
-function computeRawFairness(aValues, aPickVal, bValues, bPickVal) {
-  const aTotal = aValues.reduce((s, v) => s + v, 0) + aPickVal;
-  const bTotal = bValues.reduce((s, v) => s + v, 0) + bPickVal;
+// Raw fairness: straight sum comparison with package tax (no elite curve).
+// Tax penalizes the side sending more assets — keeps recommender consistent
+// with calculator and prevents quantity-over-quality "stars vs scrubs" deals.
+function computeRawFairness(aValues, aPickVal, bValues, bPickVal, aPickCount = 0, bPickCount = 0) {
+  let aTotal = aValues.reduce((s, v) => s + v, 0) + aPickVal;
+  let bTotal = bValues.reduce((s, v) => s + v, 0) + bPickVal;
+  const aAssets = aValues.length + aPickCount;
+  const bAssets = bValues.length + bPickCount;
+  const taxRate = getPackageTax(aAssets - bAssets);
+  if (aAssets > bAssets) aTotal *= 1 - taxRate;
+  else if (bAssets > aAssets) bTotal *= 1 - taxRate;
   const total = aTotal + bTotal || 1;
   return Math.round((aTotal / total) * 100);
 }
@@ -1381,7 +1398,7 @@ export const getRecommendedTrades = async (req, res) => {
             .sort((a, b) => a.pick_value - b.pick_value);
 
           const { givePicks, receivePicks } = selectPickPackage(
-            myTradePicks, gap, theirLatePicks, usedUpgradePickKeys,
+            myTradePicks, gap, theirLatePicks, usedUpgradePickKeys, myVal, adjustedTargetVal,
           );
 
           if (givePicks.length > 0) {
@@ -1389,6 +1406,7 @@ export const getRecommendedTrades = async (req, res) => {
             const receivePickTotal = receivePicks.reduce((s, p) => s + p.pick_value, 0);
             const rawFairness = computeRawFairness(
               [myVal], givePickTotal, [adjustedTargetVal], receivePickTotal,
+              givePicks.length, receivePicks.length,
             );
             for (const p of givePicks) usedUpgradePickKeys.add(`${p.round}-${p.season}-${p.original_roster_id}`);
             upgrades.push({
@@ -1478,7 +1496,7 @@ export const getRecommendedTrades = async (req, res) => {
               .sort((a, b) => a.pick_value - b.pick_value);
 
             const { givePicks, receivePicks } = selectPickPackage(
-              myTradePicks, gap, theirLatePicks, usedFillPickKeys,
+              myTradePicks, gap, theirLatePicks, usedFillPickKeys, offerVal, targetVal,
             );
 
             if (givePicks.length > 0) {
@@ -1486,6 +1504,7 @@ export const getRecommendedTrades = async (req, res) => {
               const receivePickTotal = receivePicks.reduce((s, p) => s + p.pick_value, 0);
               const fairness = computeRawFairness(
                 [offerVal], givePickTotal, [targetVal], receivePickTotal,
+                givePicks.length, receivePicks.length,
               );
               fillNeed.push({
                 target_team: { roster_id: team.roster_id, display_name: team.display_name },
@@ -1527,7 +1546,7 @@ export const getRecommendedTrades = async (req, res) => {
               .sort((a, b) => a.pick_value - b.pick_value);
 
             const { givePicks: fbGive, receivePicks: fbReceive } = selectPickPackage(
-              myTradePicks, fallbackGap, theirLatePicksFb, usedFallbackKeys,
+              myTradePicks, fallbackGap, theirLatePicksFb, usedFallbackKeys, basePlayer.bfbValue ?? 0, targetVal,
             );
 
             if (fbGive.length > 0) {
@@ -1535,6 +1554,7 @@ export const getRecommendedTrades = async (req, res) => {
               const receivePickTotal = fbReceive.reduce((s, p) => s + p.pick_value, 0);
               const fairness = computeRawFairness(
                 [basePlayer.bfbValue ?? 0], givePickTotal, [targetVal], receivePickTotal,
+                fbGive.length, fbReceive.length,
               );
               fillNeed.push({
                 target_team: { roster_id: team.roster_id, display_name: team.display_name },
@@ -1629,6 +1649,7 @@ export const getRecommendedTrades = async (req, res) => {
           // Fairness based on effectiveVal, not raw surplusVal
           const fairness = computeRawFairness(
             [effectiveVal], givePickTotal, [], receiveTotal,
+            givePicks.length, receivePicks.length,
           );
 
           sellSurplus.push({
