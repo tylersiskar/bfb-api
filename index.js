@@ -9,6 +9,7 @@ import {
   updatePlayerStats,
   syncLeague,
   startCronJobs,
+  currentNflSeason,
 } from "./tasks.js";
 
 const app = express();
@@ -32,7 +33,7 @@ app.get("/updatePlayers", async (req, res) => {
 });
 
 app.get("/updateStats", async (req, res) => {
-  const year = req.query.year ?? new Date().getFullYear();
+  const year = req.query.year ?? currentNflSeason();
   try {
     await updatePlayerStats(year);
     res.send("Updated player stats successfully!");

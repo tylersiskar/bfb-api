@@ -2,18 +2,38 @@ import { exec } from "../db.js";
 import { computePlayerValues } from "../utils/calculations.js";
 import { enrichWithKeeperValues } from "../utils/keeperValues.js";
 
+/**
+ * The requested season can be one Sleeper has rolled over to but that has no
+ * games played yet — the league flips to the new season in the offseason, while
+ * vw_players is keyed on seasons that actually have stats. Querying the unplayed
+ * year returns nothing, so fall back to the most recent year that has data.
+ */
+const resolveYearWithData = async (requestedYear) => {
+  const [row] = await exec(
+    `SELECT MAX(year) AS year FROM vw_players WHERE year <= $1`,
+    [requestedYear],
+  );
+  return row?.year ?? requestedYear;
+};
+
 export const getAllPlayers = async (req, res) => {
   try {
     const { position, mock } = req.query;
     let sqlQuery, bindParams;
 
     if (mock) {
+      const year = await resolveYearWithData(req.params.year);
+      if (String(year) !== String(req.params.year)) {
+        console.log(
+          `[players] year ${req.params.year} has no stats; serving ${year}`,
+        );
+      }
       if (position) {
         sqlQuery = `SELECT * FROM vw_players WHERE year = $1 AND position = $2 and value > 0 ORDER BY value DESC`;
-        bindParams = [req.params.year, position];
+        bindParams = [year, position];
       } else {
         sqlQuery = `SELECT * FROM vw_players WHERE year = $1 and value > 0 ORDER BY value DESC`;
-        bindParams = [req.params.year];
+        bindParams = [year];
       }
     } else {
       sqlQuery = `SELECT * FROM vw_players WHERE year = $1 AND ppg > 0`;

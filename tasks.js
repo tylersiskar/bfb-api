@@ -8,8 +8,20 @@ import { attemptSelfHeal } from "./utils/selfHeal.js";
 import { computeDraftOrderFromBracket } from "./utils/pickSlots.js";
 import { generateTradeReport } from "./scripts/generate_trade_report.js";
 
-async function updatePlayerStats(year = new Date().getFullYear()) {
-  console.log("Start Update Player Stats.");
+/**
+ * The NFL season currently in progress or most recently completed. Seasons are
+ * labeled by their start year and run Sept-Feb, so before September the calendar
+ * year has no regular season games and the season year is the prior one.
+ *
+ * Using the raw calendar year here buckets stats under a season that hasn't been
+ * played, which strands the frontend on an empty year once Sleeper rolls over.
+ */
+function currentNflSeason(today = new Date()) {
+  return today.getMonth() >= 8 ? today.getFullYear() : today.getFullYear() - 1;
+}
+
+async function updatePlayerStats(year = currentNflSeason()) {
+  console.log(`Start Update Player Stats (${year}).`);
   const statsResponse = await fetch(
     `https://api.sleeper.app/v1/stats/nfl/regular/${year}`,
   );
@@ -336,4 +348,10 @@ function startCronJobs() {
   console.log("Cron jobs scheduled.");
 }
 
-export { updateNflPlayers, updatePlayerStats, syncLeague, startCronJobs };
+export {
+  updateNflPlayers,
+  updatePlayerStats,
+  syncLeague,
+  startCronJobs,
+  currentNflSeason,
+};

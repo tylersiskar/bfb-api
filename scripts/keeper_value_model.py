@@ -15,7 +15,7 @@ import pandas as pd
 import numpy as np
 import json
 import os
-from datetime import datetime
+from datetime import date, datetime
 from collections import defaultdict
 
 from league_config import (
@@ -25,7 +25,37 @@ from league_config import (
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
-SEASONS = list(range(2018, 2026))  # pull 8 years of data (2018-2025)
+SEASON_START = 2018               # earliest season to pull
+FULL_SEASON_GAMES = 17
+
+
+def resolve_season_window(start=SEASON_START, today=None):
+    """
+    Seasons to pull, ending with the season currently in progress or most
+    recently completed. NFL seasons are labeled by their start year and run
+    Sept-Feb, so before September the current calendar year has no regular
+    season games yet and the window ends at the prior year.
+
+    This is an upper bound only — pull_data() prunes any trailing season that
+    comes back without real game data, so an in-progress season joins the window
+    the moment games exist and is ignored before that.
+    """
+    today = today or date.today()
+    end = today.year if today.month >= 9 else today.year - 1
+    return list(range(start, end + 1))
+
+
+SEASONS = resolve_season_window()
+
+# Fraction of a full season played, per season — populated from the loaded data
+# by compute_season_progress(). Only an in-progress season sits below 1.0.
+SEASON_PROGRESS = {}
+
+# A latest season survives the injury filter if the player appeared in at least
+# this share of the games available at that point. 8/17 reproduces the original
+# absolute 8-game threshold on a completed season while scaling mid-season.
+PROTECT_LATEST_GAME_SHARE = 8 / FULL_SEASON_GAMES
+
 PROJECTION_YEARS = 4              # how far ahead to project
 DISCOUNT_RATE = 0.18              # annual uncertainty discount
 MIN_GAMES = 10                    # must play 10+ games to qualify
@@ -114,14 +144,60 @@ OTC_DRAFT_VALUES = {
 
 # ── 1. PULL & PREPARE DATA ─────────────────────────────────────────────────
 
+def prune_unplayed_seasons(stats):
+    """
+    Drop trailing seasons that have no real game data yet.
+
+    nflreadpy can publish rows for a season before any games are played, so the
+    presence of rows is not enough — we require actual recorded games. Without
+    this, an unplayed season becomes `latest_season` and every downstream
+    replacement-level and VOR calculation is computed against an empty slate.
+    """
+    if stats.empty or "season" not in stats.columns:
+        return stats
+    games = pd.to_numeric(stats.get("games"), errors="coerce").fillna(0)
+    played = stats.loc[games > 0, "season"]
+    if played.empty:
+        return stats
+    return stats[stats["season"] <= int(played.max())]
+
+
+def compute_season_progress(df):
+    """
+    Fraction of a full season played, per season, using the league-wide max games
+    in that season. A completed season reports 1.0; only an in-progress season
+    lands below it.
+
+    This lets the weighting damp a partial season without disturbing the tuned
+    handling of injury-shortened *completed* seasons — an individual player's low
+    game count is a different signal from the whole league having played 4 weeks.
+    """
+    progress = {}
+    if df.empty or "season" not in df.columns:
+        return progress
+    games = pd.to_numeric(df["games"], errors="coerce").fillna(0)
+    for season, grp in games.groupby(df["season"]):
+        played = float(grp.max()) if not grp.empty else 0.0
+        progress[int(season)] = min(played / FULL_SEASON_GAMES, 1.0)
+    return progress
+
+
 def pull_data():
     """Pull seasonal stats, roster info, draft data, and player descriptors via nflreadpy."""
     print("Pulling seasonal player stats...")
-    stats_pl = nflr.load_player_stats(seasons=SEASONS, summary_level="reg")
-    stats = stats_pl.to_pandas()
+    try:
+        stats_pl = nflr.load_player_stats(seasons=SEASONS, summary_level="reg")
+    except Exception as e:
+        # The in-progress season may not be published at all yet — retry without it.
+        print(f"  Stats pull failed including {SEASONS[-1]} ({e}); retrying without it.")
+        stats_pl = nflr.load_player_stats(seasons=SEASONS[:-1], summary_level="reg")
+    stats = prune_unplayed_seasons(stats_pl.to_pandas())
+
+    season_window = sorted(int(s) for s in stats["season"].unique()) or SEASONS
+    print(f"  Season window: {season_window[0]}-{season_window[-1]}")
 
     print("Pulling roster data...")
-    rosters_pl = nflr.load_rosters(seasons=SEASONS)
+    rosters_pl = nflr.load_rosters(seasons=season_window)
     rosters = rosters_pl.to_pandas()
 
     print("Pulling player descriptors (all players including rookies)...")
@@ -625,8 +701,22 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
     # of their prior form, the short season is a down stretch and should be excluded
     # (e.g. LaPorta 2025: lower PPG than 2024 full season → don't protect, anchor to 2024).
     # If PPG held up (e.g. Rice 2025: elite PPG) → protect (keep in calculation).
-    _protect_latest = _latest_gp >= 8  # default: protect if enough games
-    if _protect_latest and _latest_gp > 0:
+    # Distinguish "injury-shortened" from "the season is only a few weeks old".
+    # The 8-game gate assumed a complete 17-game season; measured against the
+    # games actually available so far it means "appeared in ~47% of them". Mid
+    # season that keeps a player who has played every game to date while still
+    # correctly treating one who has missed most of them as injury-shortened —
+    # a distinction a blanket in-progress exemption would erase.
+    _games_available = max(
+        1.0, SEASON_PROGRESS.get(latest_season, 1.0) * FULL_SEASON_GAMES
+    )
+    _protect_latest = _latest_gp >= PROTECT_LATEST_GAME_SHARE * _games_available
+
+    # The down-stretch demotion compares latest PPG against the prior full season,
+    # which needs a real sample no matter how far along the season is — so it keeps
+    # the absolute 8-game gate rather than the relative one above. On a completed
+    # season _protect_latest already implies >= 8, so this is unchanged there.
+    if _protect_latest and _latest_gp >= 8:
         _prior_row = player_seasons[player_seasons["season"] == latest_season - 1]
         _latest_fp = _latest_season_row.iloc[0].get("fantasy_points_half_ppr", 0) if not _latest_season_row.empty else 0
         if not _prior_row.empty and _latest_fp > 0:
@@ -696,6 +786,27 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
             season_weights = {els: 1.0, els - 1: 3.0}
         else:
             season_weights = {els: 3.0, els - 1: 1.0}
+
+    # Partial in-progress season: scale its recency weight by how much of the
+    # season has been played, so a 4-game sample doesn't carry the same 3-4x
+    # weight as a completed year. The blend therefore starts out anchored almost
+    # entirely on the prior season and hands over to the current one as games
+    # accumulate. A completed season scores 1.0 here, so this is a no-op outside
+    # an in-progress year and prior tuning is preserved.
+    _els_progress = SEASON_PROGRESS.get(els, 1.0)
+    if _els_progress < 1.0 and len(season_weights) > 1:
+        # Scale by the player's OWN games, not the season's. Two players in the
+        # same week can have very different samples — 5 of 5 played versus 1 of 5
+        # — and the one who has missed time should carry correspondingly less
+        # weight rather than riding the season-wide figure.
+        _els_row = player_seasons[player_seasons["season"] == els]
+        _els_gp = (
+            pd.to_numeric(_els_row.iloc[0].get("games", 0), errors="coerce")
+            if not _els_row.empty else 0
+        )
+        _els_gp = 0 if pd.isna(_els_gp) else float(_els_gp)
+        season_weights[els] *= min(_els_gp / FULL_SEASON_GAMES, 1.0)
+
     weighted_ppg_sum = 0.0
     weight_sum = 0.0
 
@@ -730,21 +841,40 @@ def get_weighted_production(df, player_name, latest_season, years_exp=99, n_seas
         effective_gp = int(eg) if not pd.isna(eg) else 0
 
     if n_seasons > 1:
-        best_ppg = max(
-            (r.get("fantasy_points_half_ppr", 0) / max(pd.to_numeric(r.get("games", 1), errors="coerce"), 1))
-            for _, r in player_seasons.iterrows()
-            if pd.to_numeric(r.get("games", 0), errors="coerce") >= 1 and r.get("fantasy_points_half_ppr", 0) > 0
+        season_ppg_pairs = []
+        for _, r in player_seasons.iterrows():
+            r_fp = r.get("fantasy_points_half_ppr", 0)
+            r_gp = pd.to_numeric(r.get("games", 0), errors="coerce")
+            # `not (r_fp > 0)` rather than `r_fp <= 0` so a NaN score is excluded —
+            # NaN fails both comparisons and would otherwise poison max() below.
+            if pd.isna(r_gp) or r_gp < 1 or not (r_fp > 0):
+                continue
+            season_ppg_pairs.append((int(r["season"]), r_fp / r_gp))
+
+        # The career-peak floor should reflect completed seasons only — a hot
+        # three-game start is a small sample, not an established peak.
+        completed_ppgs = [
+            ppg for season, ppg in season_ppg_pairs
+            if not (season == els and _els_progress < 1.0)
+        ]
+        best_ppg = max(completed_ppgs) if completed_ppgs else max(
+            (ppg for _, ppg in season_ppg_pairs), default=0
         )
 
         # Floor uses effective latest season PPG (not the possibly-dropped injury year)
-        effective_row = player_seasons[player_seasons["season"] == effective_latest_season]
-        effective_ppg = 0
-        if not effective_row.empty:
-            lr = effective_row.iloc[0]
-            lr_fp = lr.get("fantasy_points_half_ppr", 0)
-            lr_gp = pd.to_numeric(lr.get("games", 0), errors="coerce")
-            if not pd.isna(lr_gp) and lr_gp >= 1 and lr_fp > 0:
-                effective_ppg = lr_fp / lr_gp
+        effective_ppg = next(
+            (ppg for season, ppg in season_ppg_pairs if season == effective_latest_season),
+            0,
+        )
+
+        # This current-form floor overrides the recency weighting entirely, which
+        # is what we want for a completed season but not for a partial one — a
+        # 2-game hot streak would otherwise set the player's whole valuation and
+        # make the damping above pointless. Ramp the floor in as the sample grows,
+        # so early-season value stays anchored on the prior year and hands over to
+        # current form by the time the season is complete.
+        if _els_progress < 1.0:
+            effective_ppg = weighted_ppg + (effective_ppg - weighted_ppg) * _els_progress
 
         weighted_ppg = max(weighted_ppg, effective_ppg, best_ppg * 0.80)
 
@@ -832,6 +962,16 @@ def calculate_keeper_values(df, curves, scarcity, draft_value_lookup=None, all_p
     for pos in POSITIONS:
         fps = sorted(pos_fps.get(pos, []), reverse=True)
         n_kept = KEEPER_DEPTH.get(pos, 12)
+        # Early in an in-progress season almost nobody clears the confidence gate,
+        # which would leave too few players to locate a replacement-level scorer
+        # and send every VOR (and therefore every keeper value) haywire. Fall back
+        # to the full qualified pool for the position when the confident sample is
+        # too thin to index into.
+        if len(fps) <= n_kept:
+            fps = sorted(
+                (q["full_season_fp"] for q in qualified if q["pos"] == pos),
+                reverse=True,
+            )
         if len(fps) > n_kept:
             replacement_fp[pos] = fps[n_kept]
         elif fps:
@@ -1302,6 +1442,15 @@ def main():
     # Merge biographical data
     print("Merging player bio data...")
     df = merge_bio_data(stats, rosters)
+
+    # Record how much of each season has been played so partial-season weighting
+    # can damp an in-progress year (see get_weighted_production).
+    global SEASON_PROGRESS
+    SEASON_PROGRESS = compute_season_progress(df)
+    _latest = int(df["season"].max())
+    _pct = SEASON_PROGRESS.get(_latest, 1.0)
+    if _pct < 1.0:
+        print(f"  {_latest} in progress: ~{round(_pct * FULL_SEASON_GAMES)} of {FULL_SEASON_GAMES} games")
 
     # Build aging curves
     print("Building positional aging curves...")

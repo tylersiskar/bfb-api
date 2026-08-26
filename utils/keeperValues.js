@@ -91,6 +91,26 @@ const PROSPECT_DISCOUNTS = {
   TE: 0.9,
 };
 
+/**
+ * A player with no NFL games has no production to model, whether or not the
+ * keeper model emitted a row for them. Both cases must resolve through the same
+ * KTC-derived path — otherwise two rookies who are identical on the field get
+ * values differing by the multiple between the two formulas, purely by accident
+ * of CSV membership.
+ */
+const hasNoProduction = (kv) =>
+  !kv || (kv.years_exp === 0 && kv.games_played === 0);
+
+const buildSubScores = (kv) => ({
+  keeper_value: kv.keeper_value,
+  longevity_score: kv.longevity_score,
+  scarcity_score: kv.scarcity_score,
+  durability_score: kv.durability_score,
+  current_value: kv.current_value,
+  projected_years_elite: kv.projected_years_elite,
+  ...(kv.age != null ? { age: kv.age } : {}),
+});
+
 export function enrichWithKeeperValues(players) {
   const map = loadKeeperValues();
   if (!map) return players;
@@ -120,7 +140,7 @@ export function enrichWithKeeperValues(players) {
   let maxProspectDiscounted = 0;
   for (const p of players) {
     const kv = lookupKeeperValue(p.full_name || p.player_name);
-    if (!kv) {
+    if (hasNoProduction(kv)) {
       const ktc = p.value ? Number(p.value) : 0;
       if (ktc > 0) {
         const d = PROSPECT_DISCOUNTS[p.position] ?? 0.9;
@@ -145,40 +165,27 @@ export function enrichWithKeeperValues(players) {
 
     // Use partial match to handle name suffixes (e.g., "Ollie Gordon" → "Ollie Gordon II")
     const kv = lookupKeeperValue(name);
-    if (!kv) {
-      // Prospects have no production data — apply position discount, then
-      // run through the elite curve so top dynasty rookies hold value while
-      // mid/late prospects compress sharply.
+
+    // No NFL production yet — value comes purely from the scraped KTC dynasty
+    // value, scaled by a position multiplier and normalized against the top
+    // prospect so rookies land on the same scale as everyone else. This covers
+    // both prospects the keeper model never scored and rookies it emitted a
+    // zero-game row for; a single path keeps rookie ordering faithful to KTC
+    // instead of depending on whether a CSV row happened to exist.
+    if (hasNoProduction(kv)) {
       const ktcValue = player.value ? Number(player.value) : 0;
-      if (ktcValue > 0) {
-        const discount = PROSPECT_DISCOUNTS[player.position] ?? 0.9;
-        const discounted = ktcValue * discount;
-        return {
-          ...player,
-          bfbValue: applyEliteCurve(discounted, maxProspectDiscounted),
-        };
-      }
-      return player;
+      if (ktcValue <= 0) return player;
+      const discount = PROSPECT_DISCOUNTS[player.position] ?? 0.9;
+      const bfbValue = applyEliteCurve(
+        ktcValue * discount,
+        maxProspectDiscounted,
+      );
+      return kv
+        ? { ...player, bfbValue, ...buildSubScores(kv) }
+        : { ...player, bfbValue };
     }
 
-    const subScores = {
-      keeper_value: kv.keeper_value,
-      longevity_score: kv.longevity_score,
-      scarcity_score: kv.scarcity_score,
-      durability_score: kv.durability_score,
-      current_value: kv.current_value,
-      projected_years_elite: kv.projected_years_elite,
-      ...(kv.age != null ? { age: kv.age } : {}),
-    };
-
-    // Incoming rookies with 0 NFL games: discount KTC dynasty value
-    // Keeps them visible for trade value but prevents 0-production players
-    // from ranking above proven producers
-    if (kv.years_exp === 0 && kv.games_played === 0) {
-      const ktcValue = player.value ? Number(player.value) : 0;
-      const discountedValue = Math.round(ktcValue * 0.3);
-      return { ...player, bfbValue: discountedValue, ...subScores };
-    }
+    const subScores = buildSubScores(kv);
 
     // 1st-year players: 20/80 blend of KTC and model value
     // Production-based keeper model dominates, KTC provides minor dynasty upside
